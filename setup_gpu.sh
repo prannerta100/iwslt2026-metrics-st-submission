@@ -12,29 +12,33 @@ echo "============================================================"
 # ---------------------------------------------------------------------------
 # 1. System packages
 # ---------------------------------------------------------------------------
-echo "[1/7] Installing system dependencies..."
+echo "[1/6] Installing system dependencies..."
 sudo apt-get update -qq
 sudo apt-get install -y -qq ffmpeg libsndfile1 sox git-lfs
 
 # ---------------------------------------------------------------------------
-# 2. Python environment
+# 2. Install Poetry
 # ---------------------------------------------------------------------------
-echo "[2/7] Setting up Python environment..."
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
+echo "[2/6] Installing Poetry..."
+if ! command -v poetry &> /dev/null; then
+    curl -sSL https://install.python-poetry.org | python3 -
+    export PATH="$HOME/.local/bin:$PATH"
 fi
-. venv/bin/activate
+poetry --version
 
-pip install --upgrade pip setuptools wheel
+# Configure poetry to create virtualenv in project directory
+poetry config virtualenvs.in-project true
 
 # ---------------------------------------------------------------------------
-# 3. PyTorch (CUDA 12.x)
+# 3. Install all dependencies
 # ---------------------------------------------------------------------------
-# echo "[3/7] Installing PyTorch with CUDA..."
-# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+echo "[3/6] Installing Python dependencies via Poetry..."
+
+# If DLAMI already has PyTorch+CUDA, use system packages
+poetry install --no-root
 
 # Verify CUDA
-python3 -c "
+poetry run python3 -c "
 import torch
 print(f'PyTorch {torch.__version__}')
 print(f'CUDA available: {torch.cuda.is_available()}')
@@ -44,45 +48,23 @@ if torch.cuda.is_available():
 "
 
 # ---------------------------------------------------------------------------
-# 4. Core ML dependencies
+# 4. HuggingFace authentication
 # ---------------------------------------------------------------------------
-echo "[4/7] Installing ML dependencies..."
-pip install numpy scipy pandas scikit-learn tqdm matplotlib seaborn
-
-# HuggingFace ecosystem
-pip install transformers>=4.40.0 datasets huggingface-hub soundfile librosa
-
-# COMET (MT evaluation) - pin setuptools for pkg_resources compatibility
-pip install 'setuptools<82'
-pip install 'unbabel-comet>=2.2.0'
-
-# SONAR/BLASER (cross-modal QE)
-pip install 'sonar-space>=0.4.0'
-
-# Audio processing
-pip install torchcodec
-
-# LightGBM for ensemble
-pip install lightgbm
-
-# ---------------------------------------------------------------------------
-# 5. HuggingFace authentication
-# ---------------------------------------------------------------------------
-echo "[5/7] Setting up HuggingFace auth..."
+echo "[4/6] Setting up HuggingFace auth..."
 if [ -z "$HF_TOKEN" ]; then
     echo "WARNING: HF_TOKEN not set. Set it with: export HF_TOKEN=your_token"
     echo "Required for downloading gated models (xCOMET-XL, CometKiwi-23-XL)"
 else
-    huggingface-cli login --token "$HF_TOKEN"
+    poetry run huggingface-cli login --token "$HF_TOKEN"
     echo "HuggingFace authenticated."
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Download models
+# 5. Download models
 # ---------------------------------------------------------------------------
-echo "[6/7] Downloading models..."
+echo "[5/6] Downloading models..."
 
-python3 -c "
+poetry run python3 -c "
 import os
 os.environ['HF_TOKEN'] = os.environ.get('HF_TOKEN', '')
 
@@ -114,7 +96,7 @@ except Exception as e:
 "
 
 # Download SONAR models
-python3 -c "
+poetry run python3 -c "
 print('Downloading SONAR/BLASER models...')
 try:
     from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
@@ -132,10 +114,10 @@ except Exception as e:
 "
 
 # ---------------------------------------------------------------------------
-# 7. Download training data
+# 6. Download training data
 # ---------------------------------------------------------------------------
-echo "[7/7] Downloading IWSLT data..."
-python3 -c "
+echo "[6/6] Downloading IWSLT data..."
+poetry run python3 -c "
 from datasets import load_dataset
 print('Loading IWSLT 2026 Metrics dataset...')
 ds = load_dataset('maikezu/iwslt2026-metrics-shared-train-dev')
@@ -154,7 +136,7 @@ echo "Setup complete!"
 echo "============================================================"
 echo ""
 echo "Next steps:"
-echo "  . venv/bin/activate"
+echo "  poetry shell"
 echo "  export HF_TOKEN=your_token"
 echo "  python scripts/02_cometkiwi_baseline.py"
 echo "  python scripts/03_finetune_cometkiwi.py"

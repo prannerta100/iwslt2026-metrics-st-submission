@@ -6,5 +6,7 @@ outputs/
 models/
 data/
 venv/
+.venv/
 submission/
 .env
+poetry.lock

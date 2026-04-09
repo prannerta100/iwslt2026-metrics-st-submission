@@ -1,0 +1,51 @@
+[tool.poetry]
+name = "iwslt2026-metrics-st"
+version = "0.1.0"
+description = "IWSLT 2026 Metrics Shared Task - Speech Translation Quality Estimation"
+authors = ["Pranav <pranav@example.com>"]
+readme = "README.md"
+packages = [{include = "scripts"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+
+# Core
+torch = ">=2.2.0"
+torchaudio = ">=2.2.0"
+numpy = "*"
+scipy = "*"
+
+# HuggingFace
+datasets = ">=4.0.0"
+transformers = ">=4.40.0"
+huggingface-hub = "*"
+soundfile = "*"
+librosa = "*"
+
+# MT Evaluation
+unbabel-comet = ">=2.2.0"
+setuptools = "<82"
+
+# SONAR / BLASER
+sonar-space = ">=0.4.0"
+
+# Audio
+torchcodec = "*"
+
+# Ensemble
+lightgbm = "*"
+
+# Utilities
+pandas = "*"
+matplotlib = "*"
+seaborn = "*"
+scikit-learn = "*"
+tqdm = "*"
+
+[tool.poetry.group.dev.dependencies]
+ipython = "*"
+jupyter = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
