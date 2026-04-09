@@ -167,8 +167,14 @@ def score_batch(model, src_texts, mt_texts):
     """
     samples = [{"src": s, "mt": m} for s, m in zip(src_texts, mt_texts)]
 
-    # prepare_sample with stage="predict" returns a dict directly (NOT a tuple)
-    input_dict = model.prepare_sample(samples, stage="predict")
+    # prepare_sample return type varies across COMET versions:
+    #   - Some versions return a dict directly for stage="predict"
+    #   - Others return a tuple (input_dict, target_dict) regardless of stage
+    result = model.prepare_sample(samples, stage="predict")
+    if isinstance(result, tuple):
+        input_dict = result[0]
+    else:
+        input_dict = result
 
     # Move tensors to device
     input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -176,7 +182,13 @@ def score_batch(model, src_texts, mt_texts):
 
     # forward() returns Prediction object with .score attribute (differentiable)
     prediction = model.forward(**input_dict)
-    return prediction.score  # Shape: [batch_size], differentiable
+    # Handle both attribute and dict access patterns across COMET versions
+    if hasattr(prediction, "score"):
+        return prediction.score  # Shape: [batch_size], differentiable
+    elif isinstance(prediction, dict):
+        return prediction["score"]
+    else:
+        return prediction[0]  # Fallback: first element of tuple
 
 
 def evaluate_on_dev(model, dev_df):
@@ -189,7 +201,7 @@ def evaluate_on_dev(model, dev_df):
     output = model.predict(samples, batch_size=128, gpus=gpus, num_workers=num_workers)
 
     dev_df = dev_df.copy()
-    dev_df["pred"] = output.scores
+    dev_df["pred"] = output.scores if hasattr(output, "scores") else output["scores"]
 
     taus = []
     for doc_id, group in dev_df.groupby("doc_id"):
@@ -409,7 +421,7 @@ gpus = 1 if device.type == "cuda" else 0
 output = model.predict(samples, batch_size=128, gpus=gpus,
                        num_workers=4 if gpus else 2)
 
-dev["pairwise_score"] = output.scores
+dev["pairwise_score"] = output.scores if hasattr(output, "scores") else output["scores"]
 
 # Compute final metrics
 taus = []
