@@ -209,13 +209,13 @@ print("\n" + "=" * 80)
 print("STEP 3: Evaluating fine-tuned model")
 print("=" * 80)
 
-# Load best checkpoint — try COMET's loader first, fall back to Lightning
+# Load best checkpoint state dict into the existing model
+# (COMET's load_from_checkpoint needs hparams.yaml which Lightning saves elsewhere)
 best_ckpt = callbacks[1].best_model_path
-try:
-    best_model = load_from_checkpoint(best_ckpt)
-except Exception as e:
-    print(f"  COMET load_from_checkpoint failed ({e}), using Lightning load")
-    best_model = model.__class__.load_from_checkpoint(best_ckpt)
+print(f"Loading best checkpoint: {best_ckpt}")
+checkpoint = torch.load(best_ckpt, weights_only=False)
+model.load_state_dict(checkpoint["state_dict"])
+best_model = model
 
 # Prepare samples
 samples = [
