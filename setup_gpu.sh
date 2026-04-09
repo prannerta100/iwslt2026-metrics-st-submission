@@ -114,18 +114,10 @@ except Exception as e:
 "
 
 # ---------------------------------------------------------------------------
-# 6. Download training data
+# 6. Download training data (text columns only, skips 71GB audio)
 # ---------------------------------------------------------------------------
-echo "[6/6] Downloading IWSLT data..."
-poetry run python3 -c "
-from datasets import load_dataset
-print('Loading IWSLT 2026 Metrics dataset...')
-ds = load_dataset('maikezu/iwslt2026-metrics-shared-train-dev')
-print(f'Splits: {list(ds.keys())}')
-for split in ds:
-    print(f'  {split}: {len(ds[split])} rows')
-print('Dataset cached successfully.')
-"
+echo "[6/6] Downloading IWSLT data (text-only parquet)..."
+poetry run python scripts/01d_download_and_explore.py
 
 # ---------------------------------------------------------------------------
 # Done
