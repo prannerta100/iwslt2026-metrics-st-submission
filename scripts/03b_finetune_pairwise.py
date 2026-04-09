@@ -285,6 +285,10 @@ print("\n--- Initial evaluation ---")
 initial_tau = evaluate_on_dev(model, dev)
 print(f"  Initial per-source Kendall Tau: {initial_tau:.4f}")
 
+# IMPORTANT: model.predict() uses PyTorch Lightning internally, which may move
+# the model back to CPU after prediction. Re-move to GPU for training.
+model = model.to(device)
+
 
 # ---------------------------------------------------------------------------
 # 7. Training loop
@@ -383,6 +387,8 @@ for epoch in range(args.epochs):
 
     # Evaluate on dev
     dev_tau = evaluate_on_dev(model, dev)
+    # Re-move model to GPU after Lightning's predict may have moved it to CPU
+    model = model.to(device)
     print(f"  Dev per-source tau: {dev_tau:.4f} "
           f"(best: {best_tau:.4f}, init: {initial_tau:.4f})")
 
