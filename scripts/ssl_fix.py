@@ -1,14 +1,22 @@
 """
-SSL fix for pyenv Python 3.13 on macOS.
-Import this FIRST before any other imports that make HTTPS requests.
+Environment setup: imported FIRST before any other imports.
 
-On macOS: patches the default SSL context to use the macOS system keychain certs.
-On Linux: no-op (system certs work fine).
+- macOS: patches SSL context to use system keychain certs.
+- Linux: no-op for SSL.
+- GPU: enables TF32 for Tensor Core acceleration.
 """
 
 import ssl
 import os
 import platform
+
+# Enable TF32 on Ampere/Blackwell GPUs for ~2x matmul speedup
+try:
+    import torch
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+except ImportError:
+    pass
 
 if platform.system() == "Darwin":
     # Generate cert bundle from macOS system keychain if not already done
