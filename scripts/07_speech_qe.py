@@ -55,7 +55,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["train", "predict", "extract_features"],
                     default="extract_features",
                     help="Mode: train full model, predict, or just extract Whisper features")
-parser.add_argument("--batch-size", type=int, default=8)
+parser.add_argument("--batch-size", type=int, default=32)
 parser.add_argument("--epochs", type=int, default=10)
 parser.add_argument("--lr", type=float, default=2e-5)
 parser.add_argument("--whisper-model", type=str, default="openai/whisper-large-v3")
@@ -88,7 +88,7 @@ class WhisperFeatureExtractor:
         print(f"  Whisper encoder loaded ({sum(p.numel() for p in self.encoder.parameters())/1e6:.0f}M params)")
 
     @torch.no_grad()
-    def extract(self, audio_paths, batch_size=4, max_len_sec=30.0):
+    def extract(self, audio_paths, batch_size=32, max_len_sec=30.0):
         """
         Extract Whisper encoder features from audio files.
         Returns: dict with 'embeddings' (N, D) and 'frame_features' (N, T, D)
@@ -449,8 +449,8 @@ if __name__ == "__main__":
         # Extract text embeddings
         print("Extracting text embeddings...")
         text_embs = []
-        for i in range(0, len(dev), 32):
-            batch = dev.iloc[i:i+32]
+        for i in range(0, len(dev), 128):
+            batch = dev.iloc[i:i+128]
             texts = [f"{r['src_text']} </s> {r['tgt_text']}" for _, r in batch.iterrows()]
             enc = tokenizer(texts, max_length=512, padding=True, truncation=True, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}

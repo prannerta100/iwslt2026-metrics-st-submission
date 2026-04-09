@@ -33,7 +33,7 @@ parser.add_argument("--model-dir", type=str, default="models/",
                     help="Directory with trained models")
 parser.add_argument("--output-dir", type=str, default="submission/",
                     help="Output directory for submission files")
-parser.add_argument("--batch-size", type=int, default=32)
+parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--method", type=str, default="auto",
                     choices=["auto", "cometkiwi", "finetuned", "ensemble"],
                     help="Scoring method (auto selects best available)")

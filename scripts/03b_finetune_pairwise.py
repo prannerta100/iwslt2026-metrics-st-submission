@@ -42,8 +42,8 @@ from scipy import stats
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("--epochs", type=int, default=5)
-parser.add_argument("--batch-size", type=int, default=8,
-                    help="Number of SOURCE segments per batch (each with multiple systems)")
+parser.add_argument("--batch-size", type=int, default=32,
+                    help="Number of pairwise samples per batch (96GB GPU can handle 32-64)")
 parser.add_argument("--lr", type=float, default=1e-5)
 parser.add_argument("--encoder-lr", type=float, default=5e-7)
 parser.add_argument("--margin", type=float, default=0.01,
@@ -221,7 +221,7 @@ def evaluate_on_dev(model, dev_df):
     # Use model.predict for evaluation
     gpus = 1 if device.type == "cuda" else 0
     num_workers = 4 if gpus else 2
-    output = model.predict(samples, batch_size=32, gpus=gpus, num_workers=num_workers)
+    output = model.predict(samples, batch_size=128, gpus=gpus, num_workers=num_workers)
 
     dev_df = dev_df.copy()
     dev_df["pred"] = output.scores
@@ -372,7 +372,7 @@ print(f"  Improvement:                    {best_tau - initial_tau:+.4f}")
 samples = [{"src": row["src_text"], "mt": row["tgt_text"]}
            for _, row in dev.iterrows()]
 gpus = 1 if device.type == "cuda" else 0
-output = model.predict(samples, batch_size=32, gpus=gpus, num_workers=2 if not gpus else 4)
+output = model.predict(samples, batch_size=128, gpus=gpus, num_workers=2 if not gpus else 4)
 dev["pairwise_finetuned_score"] = output.scores
 
 dev.to_parquet("outputs/dev_with_pairwise_finetuned.parquet", index=False)

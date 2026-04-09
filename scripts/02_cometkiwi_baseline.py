@@ -61,7 +61,7 @@ gpus = 1 if torch.cuda.is_available() else 0
 num_workers = 4 if gpus else 2
 
 start = time.time()
-output = model.predict(samples, batch_size=32, gpus=gpus, num_workers=num_workers)
+output = model.predict(samples, batch_size=128, gpus=gpus, num_workers=num_workers)
 elapsed = time.time() - start
 print(f"Inference took {elapsed:.1f}s ({len(samples)/elapsed:.1f} samples/s)")
 

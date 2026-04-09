@@ -30,8 +30,8 @@ from scipy import stats
 # Config
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument("--batch-size", type=int, default=16,
-                    help="Batch size for inference (default: 16 for 96GB GPU)")
+parser.add_argument("--batch-size", type=int, default=64,
+                    help="Batch size for inference (xCOMET-XL ~7GB, 96GB GPU handles 64 easily)")
 parser.add_argument("--model", type=str, default="Unbabel/XCOMET-XL",
                     choices=["Unbabel/XCOMET-XL", "Unbabel/XCOMET-XXL"],
                     help="xCOMET model variant")

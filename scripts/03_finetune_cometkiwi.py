@@ -121,15 +121,9 @@ if torch.cuda.is_available():
     accelerator = "gpu"
     devices = 1
     precision = "16-mixed"
-    batch_size = 16
+    batch_size = 64  # 96GB VRAM: CometKiwi ~1.2GB model, plenty of room
     print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-elif torch.backends.mps.is_available():
-    # MPS has issues with COMET, use CPU
-    accelerator = "cpu"
-    devices = 1
-    precision = 32
-    batch_size = 8
-    print("MPS detected but using CPU (MPS has compatibility issues with COMET)")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 else:
     accelerator = "cpu"
     devices = 1

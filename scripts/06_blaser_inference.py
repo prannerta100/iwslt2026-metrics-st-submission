@@ -32,7 +32,7 @@ from scipy import stats
 # Config
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument("--batch-size", type=int, default=32)
+parser.add_argument("--batch-size", type=int, default=256)
 parser.add_argument("--dev-only", action="store_true")
 parser.add_argument("--text-only", action="store_true",
                     help="Use text-text mode (src_text + tgt_text) instead of speech-text")

@@ -93,7 +93,7 @@ run_step(
 if not args.skip_xcomet:
     success = run_step(
         "xCOMET-XL Inference",
-        "python scripts/05_xcomet_inference.py --batch-size 32",
+        "python scripts/05_xcomet_inference.py --batch-size 64",
         critical=False,
     )
     if not success:
@@ -105,7 +105,7 @@ else:
 if not args.skip_blaser:
     success = run_step(
         "SONAR/BLASER-2 QE Inference",
-        "python scripts/06_blaser_inference.py --batch-size 32",
+        "python scripts/06_blaser_inference.py --batch-size 256",
         critical=False,
     )
     if not success:
@@ -117,7 +117,7 @@ else:
 if not args.skip_speech:
     success = run_step(
         "Whisper Speech Feature Extraction",
-        "python scripts/07_speech_qe.py --mode extract_features --batch-size 8",
+        "python scripts/07_speech_qe.py --mode extract_features --batch-size 32",
         critical=False,
     )
 else:
@@ -137,7 +137,7 @@ else:
 if not args.skip_speech:
     run_step(
         "Speech QE Model Training",
-        "python scripts/07_speech_qe.py --mode train --batch-size 16 --epochs 10",
+        "python scripts/07_speech_qe.py --mode train --batch-size 64 --epochs 10",
         critical=False,
     )
 
