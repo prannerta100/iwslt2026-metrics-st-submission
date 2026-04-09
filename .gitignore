@@ -1,0 +1,10 @@
+CLAUDE.md
+env.sh
+*.pyc
+__pycache__/
+outputs/
+models/
+data/
+venv/
+submission/
+.env
