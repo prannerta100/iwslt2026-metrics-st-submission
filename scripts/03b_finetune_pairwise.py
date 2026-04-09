@@ -206,8 +206,8 @@ def compute_score(model, src_texts, mt_texts):
     output = model.predict(
         samples,
         batch_size=len(samples),
-        gpus=0,  # We handle device manually
-        num_workers=0,
+        gpus=1 if torch.cuda.is_available() else 0,
+        num_workers=2,
     )
     return torch.tensor(output.scores, device=device, dtype=torch.float, requires_grad=False)
 

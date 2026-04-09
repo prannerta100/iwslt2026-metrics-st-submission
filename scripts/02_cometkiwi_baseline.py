@@ -56,9 +56,12 @@ else:
     model_path = download_model("Unbabel/wmt22-cometkiwi-da")
 model = load_from_checkpoint(model_path)
 
+import torch
+gpus = 1 if torch.cuda.is_available() else 0
+num_workers = 4 if gpus else 2
+
 start = time.time()
-# num_workers=2 needed on macOS to avoid multiprocessing_context bug with MPS detection
-output = model.predict(samples, batch_size=32, gpus=0, num_workers=2)
+output = model.predict(samples, batch_size=32, gpus=gpus, num_workers=num_workers)
 elapsed = time.time() - start
 print(f"Inference took {elapsed:.1f}s ({len(samples)/elapsed:.1f} samples/s)")
 
