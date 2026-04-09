@@ -6,8 +6,9 @@ Downloads only the parquet files and reads text columns (skips audio bytes).
 import os
 import sys
 
-os.environ["SSL_CERT_FILE"] = "/tmp/ca-bundle.crt"
-os.environ["REQUESTS_CA_BUNDLE"] = "/tmp/ca-bundle.crt"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
+import scripts.ssl_fix
+
 os.environ["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
 
 import numpy as np

@@ -6,13 +6,14 @@ Uses the datasets viewer API (first 100 rows per split).
 """
 
 import os
+import sys
 import json
 import requests
 from collections import Counter, defaultdict
 import numpy as np
 
-os.environ.setdefault("SSL_CERT_FILE", "/tmp/ca-bundle.crt")
-os.environ.setdefault("REQUESTS_CA_BUNDLE", "/tmp/ca-bundle.crt")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
+import scripts.ssl_fix
 
 DATASET_ID = "maikezu/iwslt2026-metrics-shared-train-dev"
 HF_TOKEN = os.environ.get("HF_TOKEN", "")

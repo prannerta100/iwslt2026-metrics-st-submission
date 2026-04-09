@@ -7,8 +7,8 @@ Reads only text columns (skips audio bytes) to save memory.
 import os
 import sys
 
-os.environ["SSL_CERT_FILE"] = "/tmp/ca-bundle.crt"
-os.environ["REQUESTS_CA_BUNDLE"] = "/tmp/ca-bundle.crt"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
+import scripts.ssl_fix
 
 import numpy as np
 import pandas as pd
