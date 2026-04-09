@@ -23,15 +23,15 @@ echo "[2/7] Setting up Python environment..."
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
-source venv/bin/activate
+. venv/bin/activate
 
 pip install --upgrade pip setuptools wheel
 
 # ---------------------------------------------------------------------------
 # 3. PyTorch (CUDA 12.x)
 # ---------------------------------------------------------------------------
-echo "[3/7] Installing PyTorch with CUDA..."
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# echo "[3/7] Installing PyTorch with CUDA..."
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 # Verify CUDA
 python3 -c "
@@ -154,7 +154,7 @@ echo "Setup complete!"
 echo "============================================================"
 echo ""
 echo "Next steps:"
-echo "  source venv/bin/activate"
+echo "  . venv/bin/activate"
 echo "  export HF_TOKEN=your_token"
 echo "  python scripts/02_cometkiwi_baseline.py"
 echo "  python scripts/03_finetune_cometkiwi.py"
