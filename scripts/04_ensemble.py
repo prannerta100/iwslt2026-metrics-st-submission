@@ -105,6 +105,8 @@ def optimize_weights_kendall(df, signal_cols, gold_col="score"):
     Find optimal weights by directly maximizing per-source Kendall Tau.
     Uses scipy.optimize.differential_evolution (gradient-free).
     """
+    # Reset index so group.index matches positional indices into arrays
+    df = df.reset_index(drop=True)
     signals = [df[col].values for col in signal_cols]
     n_signals = len(signals)
 
