@@ -24,6 +24,7 @@ librosa = "*"
 
 # MT Evaluation
 unbabel-comet = ">=2.2.0"
+sentencepiece = "*"
 setuptools = "<82"
 
 # SONAR / BLASER

@@ -32,6 +32,10 @@ parser.add_argument("--skip-blaser", action="store_true",
                     help="Skip BLASER (if fairseq2 not available)")
 parser.add_argument("--skip-speech", action="store_true",
                     help="Skip speech feature extraction")
+parser.add_argument("--skip-metricx", action="store_true",
+                    help="Skip MetricX-24 inference")
+parser.add_argument("--skip-cometkiwi23xxl", action="store_true",
+                    help="Skip CometKiwi-23-XXL inference")
 args = parser.parse_args()
 
 
@@ -101,7 +105,31 @@ if not args.skip_xcomet:
 else:
     print("\nSkipping xCOMET-XL (--skip-xcomet)")
 
-# 4. BLASER-2 QE
+# 4. MetricX-24-Hybrid-XXL (WMT24 winner)
+if not args.skip_metricx:
+    success = run_step(
+        "MetricX-24-Hybrid-XXL Inference",
+        "python scripts/09_metricx_inference.py --batch-size 16",
+        critical=False,
+    )
+    if not success:
+        print("MetricX-24 failed. Continuing...")
+else:
+    print("\nSkipping MetricX-24 (--skip-metricx)")
+
+# 5. CometKiwi-23-XXL (10.7B QE model)
+if not args.skip_cometkiwi23xxl:
+    success = run_step(
+        "CometKiwi-23-XXL Inference",
+        "python scripts/10_cometkiwi23xxl_inference.py --batch-size 32",
+        critical=False,
+    )
+    if not success:
+        print("CometKiwi-23-XXL failed. Continuing...")
+else:
+    print("\nSkipping CometKiwi-23-XXL (--skip-cometkiwi23xxl)")
+
+# 6. BLASER-2 QE
 if not args.skip_blaser:
     success = run_step(
         "SONAR/BLASER-2 QE Inference",
