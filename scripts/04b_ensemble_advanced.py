@@ -94,9 +94,11 @@ def build_features(df, signal_cols):
     for col in signal_cols:
         doc_stats = df.groupby("doc_id")[col].agg(["mean", "std", "min", "max"])
         doc_stats.columns = [f"{col}_doc_{stat}" for stat in ["mean", "std", "min", "max"]]
-        features = features.join(doc_stats, on=df["doc_id"].values)
+        # Map doc_id stats back to each row via .map() instead of .join(on=...)
+        for stat_col in doc_stats.columns:
+            features[stat_col] = df["doc_id"].map(doc_stats[stat_col]).values
         # Deviation from doc mean
-        features[f"{col}_doc_dev"] = df[col] - features[f"{col}_doc_mean"]
+        features[f"{col}_doc_dev"] = df[col].values - features[f"{col}_doc_mean"].values
 
     # Speech features if available
     speech_feat_file = "outputs/dev_speech_features.parquet"

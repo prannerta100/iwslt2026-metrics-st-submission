@@ -40,11 +40,11 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from scipy import stats
 
-# Use soundfile for audio I/O (torchaudio may not be installed locally)
+# Use soundfile for audio I/O (torchaudio may have ABI issues on some systems)
 try:
     import torchaudio
     HAS_TORCHAUDIO = True
-except ImportError:
+except (ImportError, OSError):
     HAS_TORCHAUDIO = False
 import soundfile as sf
 

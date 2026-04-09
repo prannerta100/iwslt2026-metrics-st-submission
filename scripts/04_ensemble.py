@@ -135,7 +135,7 @@ def optimize_weights_kendall(df, signal_cols, gold_col="score"):
         seed=42,
         maxiter=100,
         tol=1e-6,
-        workers=-1,
+        workers=1,  # workers=-1 causes pickle error with nested functions
     )
 
     optimal_weights = result.x

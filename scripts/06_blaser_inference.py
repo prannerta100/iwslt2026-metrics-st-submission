@@ -25,7 +25,11 @@ import scripts.ssl_fix
 import numpy as np
 import pandas as pd
 import torch
-import torchaudio
+try:
+    import torchaudio
+    HAS_TORCHAUDIO = True
+except (ImportError, OSError):
+    HAS_TORCHAUDIO = False
 from scipy import stats
 
 # ---------------------------------------------------------------------------
@@ -161,12 +165,14 @@ def compute_blaser_speech_text(audio_paths, tgt_texts, tgt_lang, batch_size=16):
             # SONAR speech encoder expects 16kHz mono audio
             audio_tensors = []
             for path in batch_audio:
-                waveform, sr = torchaudio.load(path)
-                if sr != 16000:
-                    waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
-                if waveform.shape[0] > 1:
-                    waveform = waveform.mean(dim=0, keepdim=True)
-                audio_tensors.append(waveform.squeeze(0))
+                import soundfile as sf_local
+                audio_array, sr = sf_local.read(path, dtype="float32")
+                if audio_array.ndim > 1:
+                    audio_array = audio_array.mean(axis=1)
+                waveform = torch.from_numpy(audio_array)
+                if sr != 16000 and HAS_TORCHAUDIO:
+                    waveform = torchaudio.transforms.Resample(sr, 16000)(waveform.unsqueeze(0)).squeeze(0)
+                audio_tensors.append(waveform)
 
             src_emb = speech_encoder.predict(audio_tensors)
             tgt_emb = text_encoder.predict(batch_tgt, source_lang=tgt_lang_code)

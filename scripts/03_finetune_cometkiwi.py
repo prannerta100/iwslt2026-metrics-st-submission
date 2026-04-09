@@ -67,8 +67,16 @@ def prepare_comet_csv(df, output_path):
         "mt": df["tgt_text"].values,
         "score": df["score"].values / 100.0,  # Normalize to 0-1
     })
-    # Drop any rows with missing values
+    # Drop any rows with missing values (prevents tokenizer TypeError)
     comet_df = comet_df.dropna()
+    # Ensure all text columns are strings (tokenizer expects str, not float/NaN)
+    comet_df["src"] = comet_df["src"].astype(str).str.strip()
+    comet_df["mt"] = comet_df["mt"].astype(str).str.strip()
+    # Remove rows where text is empty or was "nan"
+    comet_df = comet_df[
+        (comet_df["src"] != "") & (comet_df["src"] != "nan") &
+        (comet_df["mt"] != "") & (comet_df["mt"] != "nan")
+    ]
     comet_df.to_csv(output_path, index=False)
     print(f"  Saved {len(comet_df)} rows to {output_path}")
     return comet_df
