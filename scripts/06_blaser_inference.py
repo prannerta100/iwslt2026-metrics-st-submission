@@ -80,7 +80,7 @@ text_encoder = TextToEmbeddingModelPipeline(
 
 # BLASER-2 QE model (reference-free)
 print("  Loading BLASER-2 QE model...")
-blaser_qe = load_blaser_model("blaser_2_0_qe", device=device).eval()
+blaser_qe = load_blaser_model("blaser_2_0_qe").to(device).eval()
 
 # Speech encoder (only if we have audio)
 speech_encoder = None

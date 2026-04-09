@@ -209,8 +209,13 @@ print("\n" + "=" * 80)
 print("STEP 3: Evaluating fine-tuned model")
 print("=" * 80)
 
-# Load best checkpoint
-best_model = load_from_checkpoint(callbacks[1].best_model_path)
+# Load best checkpoint — try COMET's loader first, fall back to Lightning
+best_ckpt = callbacks[1].best_model_path
+try:
+    best_model = load_from_checkpoint(best_ckpt)
+except Exception as e:
+    print(f"  COMET load_from_checkpoint failed ({e}), using Lightning load")
+    best_model = model.__class__.load_from_checkpoint(best_ckpt)
 
 # Prepare samples
 samples = [
@@ -219,10 +224,9 @@ samples = [
 ]
 
 # Run inference
-if torch.cuda.is_available():
-    output = best_model.predict(samples, batch_size=batch_size, gpus=1)
-else:
-    output = best_model.predict(samples, batch_size=batch_size, gpus=0, num_workers=2)
+gpus_eval = 1 if torch.cuda.is_available() else 0
+num_workers_eval = 4 if gpus_eval else 2
+output = best_model.predict(samples, batch_size=batch_size, gpus=gpus_eval, num_workers=num_workers_eval)
 
 dev["finetuned_score"] = output["scores"]
 
@@ -260,9 +264,17 @@ for (src, tgt), group in dev.groupby(["src_lang", "tgt_lang"]):
     lp_tau = np.mean(lp_taus) if lp_taus else 0.0
     print(f"  {src}->{tgt}: per-source tau={lp_tau:.4f}")
 
-# Save predictions
+# Save predictions and merge into main predictions file
 dev.to_parquet("outputs/dev_with_finetuned.parquet", index=False)
 print(f"\nSaved predictions to outputs/dev_with_finetuned.parquet")
+
+# Merge finetuned scores into dev_with_predictions.parquet for ensemble
+existing_pred_file = "outputs/dev_with_predictions.parquet"
+if os.path.exists(existing_pred_file):
+    existing = pd.read_parquet(existing_pred_file)
+    existing["finetuned_score"] = dev["finetuned_score"].values
+    existing.to_parquet(existing_pred_file, index=False)
+    print(f"Merged finetuned_score into {existing_pred_file}")
 
 print("\n" + "=" * 80)
 print("FINE-TUNING COMPLETE")

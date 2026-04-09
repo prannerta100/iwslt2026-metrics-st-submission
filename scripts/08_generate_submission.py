@@ -133,7 +133,7 @@ try:
         tokenizer="text_sonar_basic_encoder",
         device=device,
     )
-    blaser_qe = load_blaser_model("blaser_2_0_qe", device=device).eval()
+    blaser_qe = load_blaser_model("blaser_2_0_qe").to(device).eval()
 
     LANG_MAP = {
         "en": "eng_Latn", "de": "deu_Latn", "zh": "zho_Hans",
