@@ -123,17 +123,25 @@ if not args.skip_speech:
 else:
     print("\nSkipping speech features (--skip-speech)")
 
-# 6. CometKiwi fine-tuning
+# 6. CometKiwi MSE fine-tuning
 if not args.skip_finetune:
     run_step(
-        "CometKiwi Fine-tuning",
+        "CometKiwi Fine-tuning (MSE)",
         "python scripts/03_finetune_cometkiwi.py",
         critical=False,
     )
 else:
     print("\nSkipping CometKiwi fine-tuning (--skip-finetune)")
 
-# 7. Speech QE model training
+# 7. CometKiwi pairwise ranking fine-tuning (highest impact)
+if not args.skip_finetune:
+    run_step(
+        "CometKiwi Fine-tuning (Pairwise Ranking)",
+        "python scripts/03b_finetune_pairwise.py --epochs 10 --batch-size 32",
+        critical=False,
+    )
+
+# 8. Speech QE model training
 if not args.skip_speech:
     run_step(
         "Speech QE Model Training",
@@ -141,14 +149,14 @@ if not args.skip_speech:
         critical=False,
     )
 
-# 8. Basic ensemble
+# 9. Basic ensemble
 run_step(
     "Basic Ensemble",
     "python scripts/04_ensemble.py",
     critical=False,
 )
 
-# 9. Advanced ensemble
+# 10. Advanced ensemble
 run_step(
     "Advanced Ensemble (LightGBM + Calibration)",
     "python scripts/04b_ensemble_advanced.py",

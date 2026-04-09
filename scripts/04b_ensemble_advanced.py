@@ -100,6 +100,11 @@ def build_features(df, signal_cols):
         # Deviation from doc mean
         features[f"{col}_doc_dev"] = df[col].values - features[f"{col}_doc_mean"].values
 
+    # xCOMET error features (token-level error analysis)
+    for col in ["xcomet_error_count", "xcomet_error_severity", "xcomet_error_confidence"]:
+        if col in df.columns:
+            features[col] = df[col].values
+
     # Speech features if available
     speech_feat_file = "outputs/dev_speech_features.parquet"
     if os.path.exists(speech_feat_file):
@@ -279,8 +284,8 @@ if __name__ == "__main__":
 
     # Detect available signals
     signal_cols = []
-    for col in ["cometkiwi22_score", "finetuned_score", "xcomet_score",
-                 "blaser_score", "sonar_cosine", "speechqe_score"]:
+    for col in ["cometkiwi22_score", "finetuned_score", "pairwise_score",
+                 "xcomet_score", "blaser_score", "sonar_cosine", "speechqe_score"]:
         if col in dev.columns:
             signal_cols.append(col)
 

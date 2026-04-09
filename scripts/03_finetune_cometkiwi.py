@@ -186,7 +186,7 @@ callbacks = [
 
 # Create trainer
 trainer = Trainer(
-    max_epochs=5,
+    max_epochs=10,
     accelerator=accelerator,
     devices=devices,
     precision=precision,

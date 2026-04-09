@@ -210,14 +210,10 @@ if __name__ == "__main__":
 
     # Check which signals are available
     signal_cols = []
-    if "cometkiwi22_score" in dev.columns:
-        signal_cols.append("cometkiwi22_score")
-    if "finetuned_score" in dev.columns:
-        signal_cols.append("finetuned_score")
-    if "xcomet_score" in dev.columns:
-        signal_cols.append("xcomet_score")
-    if "blaser_score" in dev.columns:
-        signal_cols.append("blaser_score")
+    for col in ["cometkiwi22_score", "finetuned_score", "pairwise_score",
+                "xcomet_score", "blaser_score"]:
+        if col in dev.columns:
+            signal_cols.append(col)
 
     print(f"Available signals: {signal_cols}")
 
