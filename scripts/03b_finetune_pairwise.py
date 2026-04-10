@@ -193,18 +193,35 @@ def score_batch(model, src_texts, mt_texts):
     return prediction.score  # Shape: [batch_size], differentiable
 
 
-def evaluate_on_dev(model, dev_df):
-    """Evaluate per-source Kendall Tau on dev set."""
+def evaluate_on_dev(model, dev_df, eval_batch_size=128):
+    """
+    Evaluate per-source Kendall Tau on dev set.
+
+    IMPORTANT: Uses model.forward() directly instead of model.predict().
+    model.predict() creates a Lightning Trainer which:
+      - Moves model between devices unpredictably
+      - May enable inference_mode which breaks gradient tracking
+      - Interferes with the training loop's optimizer state
+    """
     model.eval()
-    samples = [{"src": row["src_text"], "mt": row["tgt_text"]}
-               for _, row in dev_df.iterrows()]
-    gpus = 1 if device.type == "cuda" else 0
-    num_workers = 4 if gpus else 2
-    output = model.predict(samples, batch_size=128, gpus=gpus, num_workers=num_workers)
+    all_scores = []
+
+    with torch.no_grad():
+        for i in range(0, len(dev_df), eval_batch_size):
+            batch_df = dev_df.iloc[i:i + eval_batch_size]
+            src_texts = batch_df["src_text"].tolist()
+            mt_texts = batch_df["tgt_text"].tolist()
+
+            samples = [{"src": s, "mt": m} for s, m in zip(src_texts, mt_texts)]
+            batch = model.prepare_sample(samples, stage="predict")
+            input_dict = batch[0]
+            input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                          for k, v in input_dict.items()}
+            prediction = model.forward(**input_dict)
+            all_scores.extend(prediction.score.cpu().tolist())
 
     dev_df = dev_df.copy()
-    # predict() returns Prediction dict — use ["scores"] (confirmed in base.py line 678)
-    dev_df["pred"] = output["scores"]
+    dev_df["pred"] = all_scores
 
     taus = []
     for doc_id, group in dev_df.groupby("doc_id"):
@@ -287,10 +304,6 @@ print(f"  Ranking weight: {1 - args.mse_weight}")
 print("\n--- Initial evaluation ---")
 initial_tau = evaluate_on_dev(model, dev)
 print(f"  Initial per-source Kendall Tau: {initial_tau:.4f}")
-
-# IMPORTANT: model.predict() uses PyTorch Lightning internally, which may move
-# the model back to CPU after prediction. Re-move to GPU for training.
-model = model.to(device)
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +403,6 @@ for epoch in range(args.epochs):
 
     # Evaluate on dev
     dev_tau = evaluate_on_dev(model, dev)
-    # Re-move model to GPU after Lightning's predict may have moved it to CPU
-    model = model.to(device)
     print(f"  Dev per-source tau: {dev_tau:.4f} "
           f"(best: {best_tau:.4f}, init: {initial_tau:.4f})")
 
@@ -425,13 +436,21 @@ if best_ckpt_path and os.path.exists(best_ckpt_path):
 
 model = model.to(device)
 model.eval()
-samples = [{"src": row["src_text"], "mt": row["tgt_text"]}
-           for _, row in dev.iterrows()]
-gpus = 1 if device.type == "cuda" else 0
-output = model.predict(samples, batch_size=128, gpus=gpus,
-                       num_workers=4 if gpus else 2)
 
-dev["pairwise_score"] = output["scores"]
+# Score dev set using forward() directly (not predict() which uses Lightning)
+all_final_scores = []
+with torch.no_grad():
+    for i in range(0, len(dev), 128):
+        batch_df = dev.iloc[i:i + 128]
+        samples = [{"src": s, "mt": m}
+                   for s, m in zip(batch_df["src_text"].tolist(), batch_df["tgt_text"].tolist())]
+        batch = model.prepare_sample(samples, stage="predict")
+        input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                      for k, v in batch[0].items()}
+        prediction = model.forward(**input_dict)
+        all_final_scores.extend(prediction.score.cpu().tolist())
+
+dev["pairwise_score"] = all_final_scores
 
 # Compute final metrics
 taus = []
