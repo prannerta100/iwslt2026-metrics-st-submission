@@ -156,6 +156,10 @@ else:
 
 model = model.to(device)
 
+# Mixed precision scaler for efficient GPU training
+use_amp = device.type == "cuda"
+scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
 
 # ---------------------------------------------------------------------------
 # 4. Scoring function using COMET internals (differentiable)
@@ -349,29 +353,51 @@ for epoch in range(args.epochs):
         gold_worse = torch.tensor([b["score_worse"] for b in batch], device=device)
         gold_margins = torch.tensor([b["margin"] for b in batch], device=device)
 
-        # Forward pass (differentiable)
-        scores = score_batch(model, src_texts, mt_texts)
-        pred_better = scores[:n]
-        pred_worse = scores[n:]
+        # Forward pass with mixed precision
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            try:
+                scores = score_batch(model, src_texts, mt_texts)
+            except RuntimeError as e:
+                print(f"\n  ERROR in score_batch at step {global_step}: {e}")
+                print(f"  Batch size: {len(src_texts)} samples")
+                if "out of memory" in str(e).lower():
+                    print("  OOM — try reducing --batch-size")
+                    torch.cuda.empty_cache()
+                raise
 
-        # Adaptive margin ranking loss: margin proportional to gold score difference
-        adaptive_margin = torch.clamp(gold_margins * 0.5, min=args.margin)
-        ranking_loss = torch.clamp(
-            adaptive_margin - (pred_better - pred_worse),
-            min=0
-        ).mean()
+            pred_better = scores[:n]
+            pred_worse = scores[n:]
 
-        # MSE loss for calibration
-        all_gold = torch.cat([gold_better, gold_worse])
-        mse_loss = F.mse_loss(scores, all_gold)
+            # Adaptive margin ranking loss
+            adaptive_margin = torch.clamp(gold_margins * 0.5, min=args.margin)
+            ranking_loss = torch.clamp(
+                adaptive_margin - (pred_better - pred_worse),
+                min=0
+            ).mean()
 
-        # Combined loss
-        loss = args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss
+            # MSE loss for calibration
+            all_gold = torch.cat([gold_better, gold_worse])
+            mse_loss = F.mse_loss(scores, all_gold)
+
+            # Combined loss
+            loss = args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss
+
+        # Debug: verify gradient tracking on first step
+        if global_step == 0:
+            print(f"  [Debug] scores.requires_grad={scores.requires_grad}, "
+                  f"scores.device={scores.device}, scores.shape={scores.shape}")
+            print(f"  [Debug] loss.requires_grad={loss.requires_grad}, loss={loss.item():.6f}")
+            print(f"  [Debug] ranking_loss={ranking_loss.item():.6f}, mse_loss={mse_loss.item():.6f}")
+            trainable = sum(1 for p in model.parameters() if p.requires_grad)
+            total = sum(1 for p in model.parameters())
+            print(f"  [Debug] Trainable params: {trainable}/{total}")
 
         optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
         global_step += 1
 
