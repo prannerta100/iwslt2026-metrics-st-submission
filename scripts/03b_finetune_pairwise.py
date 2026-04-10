@@ -163,32 +163,34 @@ model = model.to(device)
 def score_batch(model, src_texts, mt_texts):
     """
     Get differentiable scores from CometKiwi for a batch.
-    Uses model.prepare_sample (returns dict for stage='predict') and model.forward.
+
+    Verified against COMET source code (unified_metric.py):
+      - prepare_sample(stage="predict") returns a TUPLE of dicts.
+        For QE (src+mt, no ref), it's a 1-element tuple: (dict,)
+        The dict has keys: input_ids, attention_mask[, token_type_ids]
+        All tensors are on CPU (created by tokenizer).
+      - forward() expects (input_ids, attention_mask, token_type_ids=None)
+      - forward() returns Prediction namedtuple with .score attribute
+      - predict_step() calls: self.forward(**batch[0])
     """
     samples = [{"src": s, "mt": m} for s, m in zip(src_texts, mt_texts)]
 
-    # prepare_sample return type varies across COMET versions:
-    #   - Some versions return a dict directly for stage="predict"
-    #   - Others return a tuple (input_dict, target_dict) regardless of stage
-    result = model.prepare_sample(samples, stage="predict")
-    if isinstance(result, tuple):
-        input_dict = result[0]
-    else:
-        input_dict = result
+    # prepare_sample returns a tuple of dicts for predict stage
+    # See unified_metric.py line 369: model_inputs["inputs"] = (dict,)
+    # and line 406-407: return model_inputs["inputs"]
+    batch = model.prepare_sample(samples, stage="predict")
 
-    # Move tensors to device
+    # batch is a tuple like ({input_ids: ..., attention_mask: ...},)
+    # Mirror what predict_step does (line 769): self.forward(**batch[0])
+    input_dict = batch[0]
+
+    # Tensors come from tokenizer on CPU — move to model's device
     input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                   for k, v in input_dict.items()}
 
-    # forward() returns Prediction object with .score attribute (differentiable)
+    # forward() returns Prediction(score=...) — see line 485
     prediction = model.forward(**input_dict)
-    # Handle both attribute and dict access patterns across COMET versions
-    if hasattr(prediction, "score"):
-        return prediction.score  # Shape: [batch_size], differentiable
-    elif isinstance(prediction, dict):
-        return prediction["score"]
-    else:
-        return prediction[0]  # Fallback: first element of tuple
+    return prediction.score  # Shape: [batch_size], differentiable
 
 
 def evaluate_on_dev(model, dev_df):
@@ -201,7 +203,8 @@ def evaluate_on_dev(model, dev_df):
     output = model.predict(samples, batch_size=128, gpus=gpus, num_workers=num_workers)
 
     dev_df = dev_df.copy()
-    dev_df["pred"] = output.scores if hasattr(output, "scores") else output["scores"]
+    # predict() returns Prediction dict — use ["scores"] (confirmed in base.py line 678)
+    dev_df["pred"] = output["scores"]
 
     taus = []
     for doc_id, group in dev_df.groupby("doc_id"):
@@ -417,9 +420,10 @@ print("=" * 80)
 # Load best model
 if best_ckpt_path and os.path.exists(best_ckpt_path):
     print(f"Loading best checkpoint: {best_ckpt_path}")
-    state_dict = torch.load(best_ckpt_path, weights_only=False)
+    state_dict = torch.load(best_ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(state_dict)
 
+model = model.to(device)
 model.eval()
 samples = [{"src": row["src_text"], "mt": row["tgt_text"]}
            for _, row in dev.iterrows()]
@@ -427,7 +431,7 @@ gpus = 1 if device.type == "cuda" else 0
 output = model.predict(samples, batch_size=128, gpus=gpus,
                        num_workers=4 if gpus else 2)
 
-dev["pairwise_score"] = output.scores if hasattr(output, "scores") else output["scores"]
+dev["pairwise_score"] = output["scores"]
 
 # Compute final metrics
 taus = []
