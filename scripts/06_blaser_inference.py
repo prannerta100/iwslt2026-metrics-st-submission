@@ -270,15 +270,20 @@ for (src_lang, tgt_lang), group in dev.groupby(["src_lang", "tgt_lang"]):
     tgt_lang_code = LANG_MAP.get(tgt_lang, "deu_Latn")
 
     with torch.no_grad():
-        src_emb = text_encoder.predict(
-            group["src_text"].tolist(), source_lang=src_lang_code
-        )
-        tgt_emb = text_encoder.predict(
-            group["tgt_text"].tolist(), source_lang=tgt_lang_code
-        )
-        # Cosine similarity
-        cos_sim = torch.nn.functional.cosine_similarity(src_emb, tgt_emb, dim=-1)
-        cosine_scores[indices] = cos_sim.cpu().numpy()
+        # Batch to avoid OOM on large language-pair groups
+        batch_size = 128
+        lp_cos = []
+        for bi in range(0, len(group), batch_size):
+            batch = group.iloc[bi:bi+batch_size]
+            src_emb = text_encoder.predict(
+                batch["src_text"].tolist(), source_lang=src_lang_code
+            )
+            tgt_emb = text_encoder.predict(
+                batch["tgt_text"].tolist(), source_lang=tgt_lang_code
+            )
+            cos_sim = torch.nn.functional.cosine_similarity(src_emb, tgt_emb, dim=-1)
+            lp_cos.append(cos_sim.cpu().numpy())
+        cosine_scores[indices] = np.concatenate(lp_cos)
 
 dev["sonar_cosine"] = cosine_scores
 cos_tau, _ = stats.kendalltau(cosine_scores, dev["score"].values)
@@ -290,10 +295,15 @@ print(f"  SONAR cosine similarity Kendall Tau: {cos_tau:.4f}")
 existing_pred_file = "outputs/dev_with_predictions.parquet"
 if os.path.exists(existing_pred_file):
     existing = pd.read_parquet(existing_pred_file)
-    existing["blaser_score"] = dev["blaser_score"].values
-    existing["sonar_cosine"] = dev["sonar_cosine"].values
-    existing.to_parquet(existing_pred_file, index=False)
-    print(f"\nMerged BLASER scores into {existing_pred_file}")
+    if len(existing) == len(dev):
+        existing["blaser_score"] = dev["blaser_score"].values
+        existing["sonar_cosine"] = dev["sonar_cosine"].values
+        existing.to_parquet(existing_pred_file, index=False)
+        print(f"\nMerged BLASER scores into {existing_pred_file}")
+    else:
+        print(f"\nWARNING: Row count mismatch ({len(existing)} vs {len(dev)}), skipping merge")
+        dev.to_parquet("outputs/dev_with_blaser.parquet", index=False)
+        print(f"Saved separately to outputs/dev_with_blaser.parquet")
 else:
     dev.to_parquet("outputs/dev_with_blaser.parquet", index=False)
     print(f"\nSaved to outputs/dev_with_blaser.parquet")

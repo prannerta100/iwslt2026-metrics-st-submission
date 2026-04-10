@@ -109,8 +109,11 @@ def build_features(df, signal_cols):
     speech_feat_file = "outputs/dev_speech_features.parquet"
     if os.path.exists(speech_feat_file):
         speech_feats = pd.read_parquet(speech_feat_file)
-        for col in speech_feats.columns:
-            features[f"speech_{col}"] = speech_feats[col].values
+        if len(speech_feats) == len(df):
+            for col in speech_feats.columns:
+                features[f"speech_{col}"] = speech_feats[col].values
+        else:
+            print(f"  WARNING: Speech features row count mismatch ({len(speech_feats)} vs {len(df)}), skipping")
 
     # Drop any NaN columns
     features = features.fillna(0)
@@ -130,7 +133,7 @@ def lightgbm_ensemble(df, features, gold_col="score", n_folds=5):
     try:
         import lightgbm as lgb
     except ImportError:
-        print("LightGBM not installed. Install with: pip install lightgbm")
+        print("LightGBM not installed. Install with: poetry add lightgbm")
         return None, None
 
     X = features.values
@@ -154,7 +157,6 @@ def lightgbm_ensemble(df, features, gold_col="score", n_folds=5):
         "bagging_freq": 5,
         "verbose": -1,
         "n_estimators": 500,
-        "early_stopping_rounds": 50,
         "seed": 42,
         # Regularization to prevent overfitting
         "lambda_l1": 0.1,
@@ -170,6 +172,7 @@ def lightgbm_ensemble(df, features, gold_col="score", n_folds=5):
         model.fit(
             train_X, train_y,
             eval_set=[(val_X, val_y)],
+            callbacks=[lgb.early_stopping(50, verbose=False)],
         )
 
         val_pred = model.predict(val_X)
@@ -209,14 +212,23 @@ def calibrate_predictions(df, pred_col, gold_col="score", n_folds=5):
     Isotonic regression calibration per language pair.
     Ensures predictions are well-calibrated to the gold score distribution.
     """
-    calibrated = np.zeros(len(df))
-    groups = df["doc_id"].values
-    gkf = GroupKFold(n_splits=n_folds)
+    # Reset index so positional and label indices align
+    df_reset = df.reset_index(drop=True)
+    calibrated = np.zeros(len(df_reset))
 
-    for (src_lang, tgt_lang), lp_group in df.groupby(["src_lang", "tgt_lang"]):
+    for (src_lang, tgt_lang), lp_group in df_reset.groupby(["src_lang", "tgt_lang"]):
         lp_indices = lp_group.index.values
+        n_unique_groups = lp_group["doc_id"].nunique()
 
-        for fold, (train_idx, val_idx) in enumerate(gkf.split(
+        if n_unique_groups < 2:
+            # Can't cross-validate, just copy raw predictions
+            calibrated[lp_indices] = lp_group[pred_col].values
+            continue
+
+        lp_folds = min(n_folds, n_unique_groups)
+        lp_gkf = GroupKFold(n_splits=lp_folds)
+
+        for fold, (train_idx, val_idx) in enumerate(lp_gkf.split(
             lp_group[pred_col].values,
             lp_group[gold_col].values,
             lp_group["doc_id"].values,

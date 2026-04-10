@@ -53,8 +53,11 @@ from comet import download_model, load_from_checkpoint
 
 print(f"\nLoading model: {args.model}")
 print("This is a 10.7B parameter model — download may take a while on first run.")
-load_start = time.time()
 
+if not os.environ.get("HF_TOKEN"):
+    print("WARNING: HF_TOKEN not set. This model is gated — run `huggingface-cli login` first.")
+
+load_start = time.time()
 model_path = download_model(args.model)
 model = load_from_checkpoint(model_path)
 
@@ -63,7 +66,7 @@ print(f"Model loaded in {time.time() - load_start:.1f}s")
 gpus = 1 if torch.cuda.is_available() else 0
 if gpus:
     print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-    vram = torch.cuda.get_device_properties(0).total_mem / 1e9 if hasattr(torch.cuda.get_device_properties(0), 'total_mem') else torch.cuda.get_device_properties(0).total_memory / 1e9
+    vram = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f"VRAM: {vram:.1f} GB")
 else:
     print("Using CPU (this will be VERY slow for XXL)")
@@ -107,10 +110,12 @@ def kendall_tau_per_source(df, pred_col, gold_col="score"):
     return np.mean(taus) if taus else 0.0
 
 
-pred_scores = dev["cometkiwi23xxl_score"].values
-per_source_tau = kendall_tau_per_source(dev, "cometkiwi23xxl_score", "score")
-overall_tau, _ = stats.kendalltau(pred_scores, dev["score"].values)
-pearson, _ = stats.pearsonr(pred_scores, dev["score"].values)
+# Drop NaN gold scores before computing correlations
+eval_dev = dev.dropna(subset=["score"])
+pred_scores = eval_dev["cometkiwi23xxl_score"].values
+per_source_tau = kendall_tau_per_source(eval_dev, "cometkiwi23xxl_score", "score")
+overall_tau, _ = stats.kendalltau(pred_scores, eval_dev["score"].values)
+pearson, _ = stats.pearsonr(pred_scores, eval_dev["score"].values)
 
 print(f"\nCometKiwi-23-XXL Results:")
 print(f"  Overall Kendall Tau:    {overall_tau:.4f}")
@@ -142,9 +147,13 @@ print(f"\nSaved to outputs/dev_with_cometkiwi23xxl.parquet")
 pred_file = "outputs/dev_with_predictions.parquet"
 if os.path.exists(pred_file):
     existing = pd.read_parquet(pred_file)
-    existing["cometkiwi23xxl_score"] = dev["cometkiwi23xxl_score"].values
-    existing.to_parquet(pred_file, index=False)
-    print(f"Merged cometkiwi23xxl_score into {pred_file}")
+    if len(existing) == len(dev):
+        existing["cometkiwi23xxl_score"] = dev["cometkiwi23xxl_score"].values
+        existing.to_parquet(pred_file, index=False)
+        print(f"Merged cometkiwi23xxl_score into {pred_file}")
+    else:
+        print(f"WARNING: Row count mismatch ({len(existing)} vs {len(dev)}), skipping merge into {pred_file}")
+        print(f"  Scores are saved separately in outputs/dev_with_cometkiwi23xxl.parquet")
 
 
 # ---------------------------------------------------------------------------

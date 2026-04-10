@@ -22,6 +22,11 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 import scripts.ssl_fix
 
+# MetricX has no PyPI package — add cloned repo to path
+METRICX_REPO = "/tmp/metricx"
+if os.path.isdir(METRICX_REPO):
+    sys.path.insert(0, METRICX_REPO)
+
 os.environ["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
 
 import numpy as np
@@ -66,7 +71,7 @@ try:
     use_metricx_class = True
 except ImportError:
     print("metricx24 package not found. Using transformers AutoModel fallback.")
-    print("For best results: git clone https://github.com/google-research/metricx && pip install -e metricx/")
+    print("For best results: bash scripts/setup_metricx.sh")
     from transformers import AutoModelForSeq2SeqLM
     use_metricx_class = False
 
@@ -254,10 +259,14 @@ print(f"\nSaved to outputs/dev_with_metricx.parquet")
 pred_file = "outputs/dev_with_predictions.parquet"
 if os.path.exists(pred_file):
     existing = pd.read_parquet(pred_file)
-    existing["metricx_score"] = dev["metricx_score"].values
-    existing["metricx_error"] = dev["metricx_error"].values
-    existing.to_parquet(pred_file, index=False)
-    print(f"Merged metricx_score into {pred_file}")
+    if len(existing) == len(dev):
+        existing["metricx_score"] = dev["metricx_score"].values
+        existing["metricx_error"] = dev["metricx_error"].values
+        existing.to_parquet(pred_file, index=False)
+        print(f"Merged metricx_score into {pred_file}")
+    else:
+        print(f"WARNING: Row count mismatch ({len(existing)} vs {len(dev)}), skipping merge into {pred_file}")
+        print(f"  Scores are saved separately in outputs/dev_with_metricx.parquet")
 
 
 # ---------------------------------------------------------------------------

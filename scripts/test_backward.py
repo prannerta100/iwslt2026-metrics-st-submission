@@ -144,7 +144,8 @@ i_better = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in b_
 i_worse = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in b_worse[0].items()}
 p_better = model.forward(**i_better).score
 p_worse = model.forward(**i_worse).score
-loss = torch.clamp(0.1 - (p_better - p_worse), min=0).mean() + F.mse_loss(p_better, torch.tensor([0.8], device=device))
+gold = torch.tensor([0.8], dtype=torch.float32, device=device)
+loss = torch.clamp(0.1 - (p_better - p_worse), min=0).mean() + F.mse_loss(p_better, gold)
 print(f"p_better={p_better.item():.4f}, p_worse={p_worse.item():.4f}, loss={loss.item():.6f}")
 try:
     loss.backward()
@@ -163,7 +164,7 @@ samples = [{"src": str(row1["src_text"]), "mt": str(row1["tgt_text"])}] * 4
 batch = model.prepare_sample(samples, stage="predict")
 inp = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch[0].items()}
 pred = model.forward(**inp)
-loss = F.mse_loss(pred.score, torch.tensor([0.5]*4, device=device))
+loss = F.mse_loss(pred.score, torch.tensor([0.5]*4, dtype=torch.float32, device=device))
 optimizer.zero_grad()
 try:
     loss.backward()

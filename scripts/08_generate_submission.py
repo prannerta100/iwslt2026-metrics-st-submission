@@ -16,6 +16,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 import scripts.ssl_fix
 
+# MetricX has no PyPI package — add cloned repo to path
+METRICX_REPO = "/tmp/metricx"
+if os.path.isdir(METRICX_REPO):
+    sys.path.insert(0, METRICX_REPO)
+
 os.environ["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
 
 import numpy as np
