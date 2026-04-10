@@ -156,10 +156,6 @@ else:
 
 model = model.to(device)
 
-# Mixed precision scaler for efficient GPU training
-use_amp = device.type == "cuda"
-scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-
 
 # ---------------------------------------------------------------------------
 # 4. Scoring function using COMET internals (differentiable)
@@ -314,6 +310,25 @@ print(f"  Initial per-source Kendall Tau: {initial_tau:.4f}")
 # 7. Training loop
 # ---------------------------------------------------------------------------
 print(f"\n--- Training ({args.epochs} epochs, {len(all_pairs)} pairs) ---")
+
+# DIAGNOSTIC: Test backward on a tiny batch before entering the loop
+print("  [Pre-flight] Testing forward+backward on 2 samples...")
+model.train()
+_test_samples = [{"src": "test source", "mt": "test translation"}] * 2
+_test_batch = model.prepare_sample(_test_samples, stage="predict")
+_test_input = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+               for k, v in _test_batch[0].items()}
+_test_pred = model.forward(**_test_input)
+_test_loss = _test_pred.score.mean()
+print(f"  [Pre-flight] score={_test_pred.score}, requires_grad={_test_pred.score.requires_grad}")
+print(f"  [Pre-flight] score.grad_fn={_test_pred.score.grad_fn}")
+_test_loss.backward()
+_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
+                for p in model.parameters() if p.requires_grad)
+print(f"  [Pre-flight] backward OK, params have gradients: {_has_grad}")
+model.zero_grad()
+print("  [Pre-flight] PASSED\n")
+
 best_tau = initial_tau
 best_ckpt_path = None
 patience = 3
@@ -346,58 +361,42 @@ for epoch in range(args.epochs):
         batch = [all_pairs[i] for i in batch_indices]
         n = len(batch)
 
-        # Concatenate better and worse into one forward pass for efficiency
-        src_texts = [b["src"] for b in batch] + [b["src"] for b in batch]
-        mt_texts = [b["mt_better"] for b in batch] + [b["mt_worse"] for b in batch]
-        gold_better = torch.tensor([b["score_better"] for b in batch], device=device)
-        gold_worse = torch.tensor([b["score_worse"] for b in batch], device=device)
-        gold_margins = torch.tensor([b["margin"] for b in batch], device=device)
+        # Score better and worse translations SEPARATELY to avoid
+        # any issues with very large batches through the encoder.
+        src_better = [b["src"] for b in batch]
+        mt_better = [b["mt_better"] for b in batch]
+        src_worse = [b["src"] for b in batch]
+        mt_worse = [b["mt_worse"] for b in batch]
 
-        # Forward pass with mixed precision
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            try:
-                scores = score_batch(model, src_texts, mt_texts)
-            except RuntimeError as e:
-                print(f"\n  ERROR in score_batch at step {global_step}: {e}")
-                print(f"  Batch size: {len(src_texts)} samples")
-                if "out of memory" in str(e).lower():
-                    print("  OOM — try reducing --batch-size")
-                    torch.cuda.empty_cache()
-                raise
+        gold_better = torch.tensor([b["score_better"] for b in batch],
+                                   dtype=torch.float32, device=device)
+        gold_worse = torch.tensor([b["score_worse"] for b in batch],
+                                  dtype=torch.float32, device=device)
+        gold_margins = torch.tensor([b["margin"] for b in batch],
+                                    dtype=torch.float32, device=device)
 
-            pred_better = scores[:n]
-            pred_worse = scores[n:]
+        # Two separate forward passes (simpler, avoids double-batch issues)
+        pred_better = score_batch(model, src_better, mt_better)
+        pred_worse = score_batch(model, src_worse, mt_worse)
 
-            # Adaptive margin ranking loss
-            adaptive_margin = torch.clamp(gold_margins * 0.5, min=args.margin)
-            ranking_loss = torch.clamp(
-                adaptive_margin - (pred_better - pred_worse),
-                min=0
-            ).mean()
+        # Adaptive margin ranking loss
+        adaptive_margin = torch.clamp(gold_margins * 0.5, min=args.margin)
+        ranking_loss = torch.clamp(
+            adaptive_margin - (pred_better - pred_worse),
+            min=0
+        ).mean()
 
-            # MSE loss for calibration
-            all_gold = torch.cat([gold_better, gold_worse])
-            mse_loss = F.mse_loss(scores, all_gold)
+        # MSE loss for calibration
+        mse_loss = (F.mse_loss(pred_better, gold_better)
+                    + F.mse_loss(pred_worse, gold_worse)) / 2.0
 
-            # Combined loss
-            loss = args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss
-
-        # Debug: verify gradient tracking on first step
-        if global_step == 0:
-            print(f"  [Debug] scores.requires_grad={scores.requires_grad}, "
-                  f"scores.device={scores.device}, scores.shape={scores.shape}")
-            print(f"  [Debug] loss.requires_grad={loss.requires_grad}, loss={loss.item():.6f}")
-            print(f"  [Debug] ranking_loss={ranking_loss.item():.6f}, mse_loss={mse_loss.item():.6f}")
-            trainable = sum(1 for p in model.parameters() if p.requires_grad)
-            total = sum(1 for p in model.parameters())
-            print(f"  [Debug] Trainable params: {trainable}/{total}")
+        # Combined loss
+        loss = args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss
 
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
+        loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
         scheduler.step()
         global_step += 1
 
