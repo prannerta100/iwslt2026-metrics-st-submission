@@ -122,19 +122,24 @@ def score_metricx_batch(src_texts, mt_texts):
         for src, mt in zip(src_texts, mt_texts)
     ]
 
-    # Tokenize
-    inputs = tokenizer(
-        input_texts,
-        max_length=args.max_length,
-        truncation=True,
-        padding=True,
-        return_tensors="pt",
-    )
+    # Tokenize each example, remove EOS per-example, then pad.
+    # MetricX was trained without EOS — must remove BEFORE padding,
+    # not after ([:, :-1] after padding removes PAD, not EOS).
+    all_ids = []
+    for text in input_texts:
+        ids = tokenizer(text, max_length=args.max_length, truncation=True)["input_ids"]
+        ids = ids[:-1]  # Remove EOS (always last token before padding)
+        all_ids.append(ids)
 
-    # CRITICAL: Remove EOS token (last token) from each sequence
-    # MetricX was trained without EOS; including it degrades quality
-    input_ids = inputs["input_ids"][:, :-1].to(device)
-    attention_mask = inputs["attention_mask"][:, :-1].to(device)
+    # Pad to max length in batch
+    max_len = max(len(ids) for ids in all_ids)
+    input_ids = torch.zeros(len(all_ids), max_len, dtype=torch.long)
+    attention_mask = torch.zeros(len(all_ids), max_len, dtype=torch.long)
+    for i, ids in enumerate(all_ids):
+        input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+        attention_mask[i, :len(ids)] = 1
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
 
     with torch.no_grad():
         # MT5ForRegression returns an object with .predictions attribute

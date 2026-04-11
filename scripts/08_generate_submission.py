@@ -156,9 +156,19 @@ try:
     for i in range(0, len(test), 16):
         batch = test.iloc[i:i+16]
         input_texts = [f"source: {s} candidate: {m}" for s, m in zip(batch["src_text"], batch["tgt_text"])]
-        inputs = metricx_tokenizer(input_texts, max_length=1536, truncation=True, padding=True, return_tensors="pt")
-        input_ids = inputs["input_ids"][:, :-1].to(device_mx)
-        attention_mask = inputs["attention_mask"][:, :-1].to(device_mx)
+        # Remove EOS per-example BEFORE padding (MetricX trained without EOS)
+        all_ids = []
+        for text in input_texts:
+            ids = metricx_tokenizer(text, max_length=1536, truncation=True)["input_ids"]
+            all_ids.append(ids[:-1])
+        max_len = max(len(ids) for ids in all_ids)
+        input_ids = torch.zeros(len(all_ids), max_len, dtype=torch.long)
+        attention_mask = torch.zeros(len(all_ids), max_len, dtype=torch.long)
+        for j, ids in enumerate(all_ids):
+            input_ids[j, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+            attention_mask[j, :len(ids)] = 1
+        input_ids = input_ids.to(device_mx)
+        attention_mask = attention_mask.to(device_mx)
         with torch.no_grad():
             outputs = metricx_model(input_ids=input_ids, attention_mask=attention_mask)
             scores = outputs.predictions.cpu().numpy()
