@@ -105,6 +105,15 @@ else:
     print("Using CPU (this will be VERY slow for XXL)")
 
 model.eval()
+
+# Patch: metricx24 was written for transformers==4.30.2. Newer transformers
+# (>=4.40) adds _update_causal_mask in T5Stack that creates a causal mask
+# incompatible with the metricx forward(). The decoder only processes a
+# single dummy token, so causal masking is irrelevant. Disable it.
+if hasattr(model.decoder, '_update_causal_mask'):
+    model.decoder._update_causal_mask = lambda *args, **kwargs: None
+    print("Patched decoder causal mask for transformers compatibility")
+
 print(f"Model loaded in {time.time() - load_start:.1f}s")
 
 

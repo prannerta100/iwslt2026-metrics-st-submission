@@ -151,6 +151,8 @@ try:
 
     device_mx = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     metricx_model = metricx_model.to(device_mx).eval()
+    if hasattr(metricx_model.decoder, '_update_causal_mask'):
+        metricx_model.decoder._update_causal_mask = lambda *args, **kwargs: None
 
     metricx_scores = []
     for i in range(0, len(test), 16):
