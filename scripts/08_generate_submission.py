@@ -192,9 +192,8 @@ try:
                 encoder_attention_mask=attention_mask,
                 return_dict=True, use_cache=False,
             )
-            preds = metricx_model.regression_head(
-                dec_out.last_hidden_state[:, 0, :]
-            ).squeeze(-1)
+            lm_logits = metricx_model.lm_head(dec_out.last_hidden_state[:, 0, :])
+            preds = lm_logits[:, 250089]  # <extra_id_10> logit = MQM error score
             scores = preds.float().cpu().numpy()
         metricx_scores.extend(np.clip(scores, 0, 25).tolist())
     test["metricx_score"] = 25.0 - np.array(metricx_scores)  # Invert: quality = 25 - error

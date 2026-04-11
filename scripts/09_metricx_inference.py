@@ -181,9 +181,12 @@ def score_metricx_batch(src_texts, mt_texts):
             use_cache=False,
         )
 
-        # Step 3: Regression head
+        # Step 3: LM head → extract logit at vocab index 250089 (<extra_id_10>)
+        # MetricX uses the LM head as a regression proxy: one specific vocab
+        # token's logit is treated as the MQM error score.
         sequence_output = decoder_out.last_hidden_state  # [batch, 1, hidden]
-        predictions = model.regression_head(sequence_output[:, 0, :]).squeeze(-1)
+        lm_logits = model.lm_head(sequence_output[:, 0, :])  # [batch, vocab_size]
+        predictions = lm_logits[:, 250089]  # [batch]
         scores = predictions.float().cpu().numpy()
 
     # Clip to valid range [0, 25]
