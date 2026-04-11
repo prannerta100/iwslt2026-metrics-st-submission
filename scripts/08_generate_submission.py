@@ -144,15 +144,25 @@ try:
     print("\n--- MetricX-24-Hybrid-XXL ---")
     from transformers import AutoTokenizer
     from metricx24.models import MT5ForRegression
-    metricx_model = MT5ForRegression.from_pretrained(
-        "google/metricx-24-hybrid-xxl-v2p6-bfloat16", torch_dtype="auto"
-    )
+    try:
+        metricx_model = MT5ForRegression.from_pretrained(
+            "google/metricx-24-hybrid-xxl-v2p6-bfloat16", torch_dtype="auto",
+            attn_implementation="eager"
+        )
+    except TypeError:
+        metricx_model = MT5ForRegression.from_pretrained(
+            "google/metricx-24-hybrid-xxl-v2p6-bfloat16", torch_dtype="auto"
+        )
     metricx_tokenizer = AutoTokenizer.from_pretrained("google/mt5-xxl")
 
     device_mx = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     metricx_model = metricx_model.to(device_mx).eval()
-    if hasattr(metricx_model.decoder, '_update_causal_mask'):
-        metricx_model.decoder._update_causal_mask = lambda *args, **kwargs: None
+    # Force eager attention on all sub-configs
+    for _, module in metricx_model.named_modules():
+        if hasattr(module, 'config'):
+            module.config._attn_implementation = "eager"
+            if hasattr(module.config, '_attn_implementation_internal'):
+                module.config._attn_implementation_internal = "eager"
 
     metricx_scores = []
     for i in range(0, len(test), 16):
@@ -172,8 +182,20 @@ try:
         input_ids = input_ids.to(device_mx)
         attention_mask = attention_mask.to(device_mx)
         with torch.no_grad():
-            outputs = metricx_model(input_ids=input_ids, attention_mask=attention_mask)
-            scores = outputs.predictions.cpu().numpy()
+            enc_out = metricx_model.encoder(
+                input_ids=input_ids, attention_mask=attention_mask, return_dict=True
+            )
+            dec_ids = torch.zeros(input_ids.shape[0], 1, dtype=torch.long, device=device_mx)
+            dec_out = metricx_model.decoder(
+                input_ids=dec_ids,
+                encoder_hidden_states=enc_out.last_hidden_state,
+                encoder_attention_mask=attention_mask,
+                return_dict=True, use_cache=False,
+            )
+            preds = metricx_model.regression_head(
+                dec_out.last_hidden_state[:, 0, :]
+            ).squeeze(-1)
+            scores = preds.float().cpu().numpy()
         metricx_scores.extend(np.clip(scores, 0, 25).tolist())
     test["metricx_score"] = 25.0 - np.array(metricx_scores)  # Invert: quality = 25 - error
     print(f"  Score range: [{test['metricx_score'].min():.4f}, {test['metricx_score'].max():.4f}]")

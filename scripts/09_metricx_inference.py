@@ -90,7 +90,24 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 print(f"Loading model weights...")
 load_start = time.time()
 
-model = MT5ForRegression.from_pretrained(args.model, torch_dtype="auto")
+# Force eager attention to avoid SDPA causal mask dimension mismatch in decoder
+# cross-attention (transformers >= 4.38: causal mask shape [B, 1, dec_len, dec_len]
+# is incompatible with cross-attention position_bias [B, heads, dec_len, enc_len])
+try:
+    model = MT5ForRegression.from_pretrained(
+        args.model, torch_dtype="auto", attn_implementation="eager"
+    )
+    print("  Loaded with attn_implementation='eager'")
+except TypeError:
+    model = MT5ForRegression.from_pretrained(args.model, torch_dtype="auto")
+    print("  attn_implementation kwarg not supported — patching config post-load")
+
+# Belt-and-suspenders: force eager attention on every sub-module config
+for _, module in model.named_modules():
+    if hasattr(module, 'config'):
+        module.config._attn_implementation = "eager"
+        if hasattr(module.config, '_attn_implementation_internal'):
+            module.config._attn_implementation_internal = "eager"
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -105,56 +122,69 @@ else:
     print("Using CPU (this will be VERY slow for XXL)")
 
 model.eval()
-
-# Patch: metricx24 was written for transformers==4.30.2. Newer transformers
-# (>=4.40) adds _update_causal_mask in T5Stack that creates a causal mask
-# incompatible with the metricx forward(). The decoder only processes a
-# single dummy token, so causal masking is irrelevant. Disable it.
-if hasattr(model.decoder, '_update_causal_mask'):
-    model.decoder._update_causal_mask = lambda *args, **kwargs: None
-    print("Patched decoder causal mask for transformers compatibility")
-
 print(f"Model loaded in {time.time() - load_start:.1f}s")
 
 
 # ---------------------------------------------------------------------------
 # 3. Inference function
 # ---------------------------------------------------------------------------
+# Call encoder, decoder, and regression head separately for robustness.
+# Combined with attn_implementation="eager" above, this avoids all known
+# transformers >= 4.38 incompatibilities with MetricX's T5-based architecture.
+
 def score_metricx_batch(src_texts, mt_texts):
     """
     Score a batch of (source, candidate) pairs with MetricX-24.
     Returns MQM error scores in [0, 25] (lower = better).
     """
-    # Format inputs for QE mode (no reference)
     input_texts = [
         f"source: {src} candidate: {mt}"
         for src, mt in zip(src_texts, mt_texts)
     ]
 
     # Tokenize each example, remove EOS per-example, then pad.
-    # MetricX was trained without EOS — must remove BEFORE padding,
-    # not after ([:, :-1] after padding removes PAD, not EOS).
     all_ids = []
     for text in input_texts:
         ids = tokenizer(text, max_length=args.max_length, truncation=True)["input_ids"]
-        ids = ids[:-1]  # Remove EOS (always last token before padding)
+        ids = ids[:-1]  # Remove EOS (MetricX trained without it)
         all_ids.append(ids)
 
-    # Pad to max length in batch
     max_len = max(len(ids) for ids in all_ids)
-    input_ids = torch.zeros(len(all_ids), max_len, dtype=torch.long)
-    attention_mask = torch.zeros(len(all_ids), max_len, dtype=torch.long)
+    input_ids = torch.zeros(len(all_ids), max_len, dtype=torch.long, device=device)
+    attention_mask = torch.zeros(len(all_ids), max_len, dtype=torch.long, device=device)
     for i, ids in enumerate(all_ids):
         input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
         attention_mask[i, :len(ids)] = 1
-    input_ids = input_ids.to(device)
-    attention_mask = attention_mask.to(device)
 
     with torch.no_grad():
-        # MT5ForRegression returns an object with .predictions attribute
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        # .predictions is shape [batch_size] with MQM error scores
-        scores = outputs.predictions.cpu().numpy()
+        # Step 1: Encode
+        encoder_out = model.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
+        encoder_hidden = encoder_out.last_hidden_state  # [batch, seq_len, hidden]
+
+        # Step 2: Decode with single dummy token
+        batch_size = input_ids.shape[0]
+        decoder_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+
+        # Pass 2D attention_mask — T5Stack.invert_attention_mask will
+        # expand to 4D [batch, 1, 1, seq_len] and invert correctly.
+        # The key: encoder_hidden and attention_mask have the SAME seq_len
+        # because we built them from the same tokenized ids.
+        decoder_out = model.decoder(
+            input_ids=decoder_ids,
+            encoder_hidden_states=encoder_hidden,
+            encoder_attention_mask=attention_mask,
+            return_dict=True,
+            use_cache=False,
+        )
+
+        # Step 3: Regression head
+        sequence_output = decoder_out.last_hidden_state  # [batch, 1, hidden]
+        predictions = model.regression_head(sequence_output[:, 0, :]).squeeze(-1)
+        scores = predictions.float().cpu().numpy()
 
     # Clip to valid range [0, 25]
     scores = np.clip(scores, 0.0, 25.0)
