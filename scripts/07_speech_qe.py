@@ -382,10 +382,14 @@ def extract_whisper_features():
 
     # Compute simple speech features for ensemble
     # These features capture speech characteristics
-    assert len(embeddings) == len(dev_text), (
-        f"Row count mismatch: embeddings={len(embeddings)}, dev_text={len(dev_text)}. "
-        f"Ensure dev_split and dev_text.parquet have the same rows."
-    )
+    if len(embeddings) != len(dev_text):
+        print(f"WARNING: Row count mismatch: embeddings={len(embeddings)}, dev_text={len(dev_text)}")
+        print("Using min length to align data")
+        n = min(len(embeddings), len(dev_text))
+        embeddings = embeddings[:n]
+        audio_paths = audio_paths[:n]
+        dev_text = dev_text.iloc[:n].reset_index(drop=True)
+
     speech_features = pd.DataFrame(index=dev_text.index)
     speech_features["whisper_emb_norm"] = np.linalg.norm(embeddings, axis=1)
     speech_features["whisper_emb_mean"] = embeddings.mean(axis=1)

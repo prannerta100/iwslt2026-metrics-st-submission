@@ -143,16 +143,10 @@ except Exception as e:
 try:
     print("\n--- MetricX-24-Hybrid-XXL ---")
     from transformers import AutoTokenizer
-    try:
-        from metricx24.models import MT5ForRegression
-        metricx_model = MT5ForRegression.from_pretrained(
-            "google/metricx-24-hybrid-xxl-v2p6-bfloat16", torch_dtype="auto"
-        )
-    except ImportError:
-        from transformers import AutoModelForSeq2SeqLM
-        metricx_model = AutoModelForSeq2SeqLM.from_pretrained(
-            "google/metricx-24-hybrid-xxl-v2p6-bfloat16", torch_dtype="auto"
-        )
+    from metricx24.models import MT5ForRegression
+    metricx_model = MT5ForRegression.from_pretrained(
+        "google/metricx-24-hybrid-xxl-v2p6-bfloat16", torch_dtype="auto"
+    )
     metricx_tokenizer = AutoTokenizer.from_pretrained("google/mt5-xxl")
 
     device_mx = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -167,11 +161,7 @@ try:
         attention_mask = inputs["attention_mask"][:, :-1].to(device_mx)
         with torch.no_grad():
             outputs = metricx_model(input_ids=input_ids, attention_mask=attention_mask)
-            if hasattr(outputs, "predictions"):
-                scores = outputs.predictions.cpu().numpy()
-            else:
-                logits = outputs.logits[:, 0, :]
-                scores = logits[:, min(250089, logits.shape[-1]-1)].cpu().numpy()
+            scores = outputs.predictions.cpu().numpy()
         metricx_scores.extend(np.clip(scores, 0, 25).tolist())
     test["metricx_score"] = 25.0 - np.array(metricx_scores)  # Invert: quality = 25 - error
     print(f"  Score range: [{test['metricx_score'].min():.4f}, {test['metricx_score'].max():.4f}]")

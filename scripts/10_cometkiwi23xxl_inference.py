@@ -125,7 +125,7 @@ print(f"  Score range: [{pred_scores.min():.4f}, {pred_scores.max():.4f}]")
 print(f"  Score mean:  {pred_scores.mean():.4f} (std={pred_scores.std():.4f})")
 
 # Per language pair
-for (src, tgt), group in dev.groupby(["src_lang", "tgt_lang"]):
+for (src, tgt), group in eval_dev.groupby(["src_lang", "tgt_lang"]):
     lp_taus = []
     for doc_id, doc_group in group.groupby("doc_id"):
         if len(doc_group) < 2:

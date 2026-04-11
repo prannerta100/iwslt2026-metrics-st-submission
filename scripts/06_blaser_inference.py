@@ -49,7 +49,7 @@ print("=" * 80)
 print("SONAR/BLASER-2 QE INFERENCE")
 print("=" * 80)
 
-dev = pd.read_parquet("outputs/dev_text.parquet")
+dev = pd.read_parquet("outputs/dev_text.parquet").reset_index(drop=True)
 print(f"Dev set: {len(dev)} rows")
 
 # Check if we have audio paths
@@ -161,20 +161,8 @@ def compute_blaser_speech_text(audio_paths, tgt_texts, tgt_lang, batch_size=16):
         batch_tgt = tgt_texts[i:i+batch_size]
 
         with torch.no_grad():
-            # Load and encode audio
-            # SONAR speech encoder expects 16kHz mono audio
-            audio_tensors = []
-            for path in batch_audio:
-                import soundfile as sf_local
-                audio_array, sr = sf_local.read(path, dtype="float32")
-                if audio_array.ndim > 1:
-                    audio_array = audio_array.mean(axis=1)
-                waveform = torch.from_numpy(audio_array)
-                if sr != 16000 and HAS_TORCHAUDIO:
-                    waveform = torchaudio.transforms.Resample(sr, 16000)(waveform.unsqueeze(0)).squeeze(0)
-                audio_tensors.append(waveform)
-
-            src_emb = speech_encoder.predict(audio_tensors)
+            # SONAR speech encoder expects file paths, not raw tensors
+            src_emb = speech_encoder.predict(batch_audio)
             tgt_emb = text_encoder.predict(batch_tgt, source_lang=tgt_lang_code)
 
             batch_scores = blaser_qe(src=src_emb, mt=tgt_emb).squeeze(-1)
@@ -226,8 +214,10 @@ print(f"\nBLASER inference: {elapsed:.1f}s ({len(dev)/elapsed:.1f} samples/s)")
 # ---------------------------------------------------------------------------
 print("\n--- BLASER-2 Dev Results ---")
 
-overall_tau, _ = stats.kendalltau(dev["blaser_score"].values, dev["score"].values)
-pearson_r, _ = stats.pearsonr(dev["blaser_score"].values, dev["score"].values)
+eval_mask = dev["score"].notna() & dev["blaser_score"].notna()
+eval_dev = dev[eval_mask]
+overall_tau, _ = stats.kendalltau(eval_dev["blaser_score"].values, eval_dev["score"].values)
+pearson_r, _ = stats.pearsonr(eval_dev["blaser_score"].values, eval_dev["score"].values)
 
 taus = []
 for doc_id, group in dev.groupby("doc_id"):

@@ -68,12 +68,11 @@ print(f"\nLoading MetricX model: {args.model}")
 try:
     from metricx24.models import MT5ForRegression
     print("Using metricx24.models.MT5ForRegression")
-    use_metricx_class = True
 except ImportError:
-    print("metricx24 package not found. Using transformers AutoModel fallback.")
-    print("For best results: bash scripts/setup_metricx.sh")
-    from transformers import AutoModelForSeq2SeqLM
-    use_metricx_class = False
+    print("ERROR: metricx24 package not found.")
+    print("MetricX requires the custom MT5ForRegression class — AutoModel fallback produces garbage.")
+    print("Run: bash scripts/setup_metricx.sh")
+    sys.exit(1)
 
 from transformers import AutoTokenizer
 
@@ -91,10 +90,7 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 print(f"Loading model weights...")
 load_start = time.time()
 
-if use_metricx_class:
-    model = MT5ForRegression.from_pretrained(args.model, torch_dtype="auto")
-else:
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model, torch_dtype="auto")
+model = MT5ForRegression.from_pretrained(args.model, torch_dtype="auto")
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -141,28 +137,10 @@ def score_metricx_batch(src_texts, mt_texts):
     attention_mask = inputs["attention_mask"][:, :-1].to(device)
 
     with torch.no_grad():
-        if use_metricx_class:
-            # MT5ForRegression returns an object with .predictions attribute
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            # .predictions is shape [batch_size] with MQM error scores
-            scores = outputs.predictions.cpu().numpy()
-        else:
-            # Fallback: use encoder + extract logits at token 250089 (<extra_id_10>)
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                decoder_input_ids=torch.zeros(
-                    (input_ids.shape[0], 1), dtype=torch.long, device=device
-                ),
-            )
-            # Score is logit at position [0, 250089]
-            # Token ID 250089 = <extra_id_10>
-            logits = outputs.logits[:, 0, :]  # [batch, vocab_size]
-            if logits.shape[-1] > 250089:
-                scores = logits[:, 250089].cpu().numpy()
-            else:
-                # Fallback: just use first logit
-                scores = logits[:, 0].cpu().numpy()
+        # MT5ForRegression returns an object with .predictions attribute
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        # .predictions is shape [batch_size] with MQM error scores
+        scores = outputs.predictions.cpu().numpy()
 
     # Clip to valid range [0, 25]
     scores = np.clip(scores, 0.0, 25.0)

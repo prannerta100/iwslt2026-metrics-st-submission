@@ -5,14 +5,17 @@ Runs the full pipeline in order:
   1. Data preparation (download + explore)
   2. CometKiwi-22 baseline
   3. xCOMET-XL inference (if model access granted)
-  4. SONAR/BLASER-2 QE inference
-  5. Whisper speech feature extraction
-  6. CometKiwi fine-tuning
-  7. Speech QE model training
-  8. Advanced ensemble
-  9. Generate submission files
+  4. MetricX-24-Hybrid-XXL setup + inference
+  5. CometKiwi-23-XXL inference
+  6. SONAR/BLASER-2 QE inference
+  7. Whisper speech feature extraction
+  8. CometKiwi fine-tuning (MSE + pairwise)
+  9. Speech QE model training
+ 10. Basic ensemble
+ 11. Advanced ensemble
+ 12. Generate submission files
 
-Run on GPU: python scripts/run_all.py [--skip-download] [--skip-finetune]
+Run on GPU: poetry run python scripts/run_all.py [--skip-download] [--skip-finetune]
 """
 
 import os
@@ -36,6 +39,8 @@ parser.add_argument("--skip-metricx", action="store_true",
                     help="Skip MetricX-24 inference")
 parser.add_argument("--skip-cometkiwi23xxl", action="store_true",
                     help="Skip CometKiwi-23-XXL inference")
+parser.add_argument("--skip-submission", action="store_true",
+                    help="Skip submission generation")
 args = parser.parse_args()
 
 
@@ -75,12 +80,11 @@ print("=" * 80)
 if not args.skip_download:
     run_step(
         "Data Download & Exploration",
-        "python scripts/01d_download_and_explore.py",
+        "poetry run python scripts/01d_download_and_explore.py",
         critical=True,
     )
 else:
     print("\nSkipping data download (--skip-download)")
-    # Verify data exists
     for f in ["outputs/dev_text.parquet", "outputs/train_text.parquet"]:
         if not os.path.exists(f):
             print(f"ERROR: {f} not found. Run without --skip-download first.")
@@ -89,7 +93,7 @@ else:
 # 2. CometKiwi-22 baseline
 run_step(
     "CometKiwi-22 Baseline",
-    "python scripts/02_cometkiwi_baseline.py",
+    "poetry run python scripts/02_cometkiwi_baseline.py",
     critical=True,
 )
 
@@ -97,7 +101,7 @@ run_step(
 if not args.skip_xcomet:
     success = run_step(
         "xCOMET-XL Inference",
-        "python scripts/05_xcomet_inference.py --batch-size 64",
+        "poetry run python scripts/05_xcomet_inference.py --batch-size 64",
         critical=False,
     )
     if not success:
@@ -107,9 +111,14 @@ else:
 
 # 4. MetricX-24-Hybrid-XXL (WMT24 winner)
 if not args.skip_metricx:
+    run_step(
+        "MetricX-24 Setup",
+        "bash scripts/setup_metricx.sh",
+        critical=False,
+    )
     success = run_step(
         "MetricX-24-Hybrid-XXL Inference",
-        "python scripts/09_metricx_inference.py --batch-size 16",
+        "PYTHONPATH=/tmp/metricx:$PYTHONPATH poetry run python scripts/09_metricx_inference.py --batch-size 16",
         critical=False,
     )
     if not success:
@@ -121,7 +130,7 @@ else:
 if not args.skip_cometkiwi23xxl:
     success = run_step(
         "CometKiwi-23-XXL Inference",
-        "python scripts/10_cometkiwi23xxl_inference.py --batch-size 32",
+        "poetry run python scripts/10_cometkiwi23xxl_inference.py --batch-size 32",
         critical=False,
     )
     if not success:
@@ -133,7 +142,7 @@ else:
 if not args.skip_blaser:
     success = run_step(
         "SONAR/BLASER-2 QE Inference",
-        "python scripts/06_blaser_inference.py --batch-size 256",
+        "poetry run python scripts/06_blaser_inference.py --batch-size 256",
         critical=False,
     )
     if not success:
@@ -141,55 +150,60 @@ if not args.skip_blaser:
 else:
     print("\nSkipping BLASER-2 (--skip-blaser)")
 
-# 5. Whisper speech features
+# 7. Whisper speech features
 if not args.skip_speech:
     success = run_step(
         "Whisper Speech Feature Extraction",
-        "python scripts/07_speech_qe.py --mode extract_features --batch-size 32",
+        "poetry run python scripts/07_speech_qe.py --mode extract_features --batch-size 32",
         critical=False,
     )
 else:
     print("\nSkipping speech features (--skip-speech)")
 
-# 6. CometKiwi MSE fine-tuning
+# 8. CometKiwi fine-tuning
 if not args.skip_finetune:
     run_step(
         "CometKiwi Fine-tuning (MSE)",
-        "python scripts/03_finetune_cometkiwi.py",
+        "poetry run python scripts/03_finetune_cometkiwi.py",
+        critical=False,
+    )
+    run_step(
+        "CometKiwi Fine-tuning (Pairwise Ranking)",
+        "poetry run python scripts/03b_finetune_pairwise.py --epochs 10 --batch-size 32",
         critical=False,
     )
 else:
     print("\nSkipping CometKiwi fine-tuning (--skip-finetune)")
 
-# 7. CometKiwi pairwise ranking fine-tuning (highest impact)
-if not args.skip_finetune:
-    run_step(
-        "CometKiwi Fine-tuning (Pairwise Ranking)",
-        "python scripts/03b_finetune_pairwise.py --epochs 10 --batch-size 32",
-        critical=False,
-    )
-
-# 8. Speech QE model training
+# 9. Speech QE model training
 if not args.skip_speech:
     run_step(
         "Speech QE Model Training",
-        "python scripts/07_speech_qe.py --mode train --batch-size 64 --epochs 10",
+        "poetry run python scripts/07_speech_qe.py --mode train --batch-size 64 --epochs 10",
         critical=False,
     )
 
-# 9. Basic ensemble
+# 10. Basic ensemble
 run_step(
     "Basic Ensemble",
-    "python scripts/04_ensemble.py",
+    "poetry run python scripts/04_ensemble.py",
     critical=False,
 )
 
-# 10. Advanced ensemble
+# 11. Advanced ensemble
 run_step(
     "Advanced Ensemble (LightGBM + Calibration)",
-    "python scripts/04b_ensemble_advanced.py",
+    "poetry run python scripts/04b_ensemble_advanced.py",
     critical=True,
 )
+
+# 12. Generate submission
+if not args.skip_submission:
+    run_step(
+        "Generate Submission",
+        "poetry run python scripts/08_generate_submission.py --test-data outputs/dev_text.parquet",
+        critical=True,
+    )
 
 # Summary
 total_time = time.time() - pipeline_start
@@ -199,7 +213,9 @@ print("=" * 80)
 
 # Check outputs
 print("\nGenerated files:")
-for f in sorted(os.listdir("outputs")):
-    if f.endswith((".parquet", ".npy", ".md")):
-        size = os.path.getsize(os.path.join("outputs", f))
-        print(f"  {f} ({size/1024:.1f} KB)")
+outputs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs")
+if os.path.isdir(outputs_dir):
+    for f in sorted(os.listdir(outputs_dir)):
+        if f.endswith((".parquet", ".npy", ".md")):
+            size = os.path.getsize(os.path.join(outputs_dir, f))
+            print(f"  {f} ({size/1024:.1f} KB)")
