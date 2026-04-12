@@ -70,25 +70,33 @@ def soft_pairwise_accuracy(df, pred_col, gold_col="score", threshold=25.0):
 # Feature engineering
 # ---------------------------------------------------------------------------
 
-def build_features(df, signal_cols):
-    """Build full feature matrix from all available signals."""
+def build_features(df, signal_cols, speech_feat_file=None):
+    """Build full feature matrix from all available signals.
+
+    Args:
+        df: DataFrame with src_text, tgt_text, tgt_lang, doc_id, and signal columns
+        signal_cols: list of metric score column names to use
+        speech_feat_file: path to speech features parquet (must match df row count)
+    """
     features = pd.DataFrame(index=df.index)
 
     # Neural metric scores
     for col in signal_cols:
         features[col] = df[col].values
 
-    # Text features
-    features["src_word_count"] = df["src_text"].str.split().str.len()
-    features["tgt_word_count"] = df["tgt_text"].str.split().str.len()
-    features["length_ratio"] = features["tgt_word_count"] / features["src_word_count"].clip(lower=1)
-    features["src_char_count"] = df["src_text"].str.len()
-    features["tgt_char_count"] = df["tgt_text"].str.len()
-    features["char_ratio"] = features["tgt_char_count"] / features["src_char_count"].clip(lower=1)
+    # Text features (guard against missing columns)
+    if "src_text" in df.columns and "tgt_text" in df.columns:
+        features["src_word_count"] = df["src_text"].str.split().str.len()
+        features["tgt_word_count"] = df["tgt_text"].str.split().str.len()
+        features["length_ratio"] = features["tgt_word_count"] / features["src_word_count"].clip(lower=1)
+        features["src_char_count"] = df["src_text"].str.len()
+        features["tgt_char_count"] = df["tgt_text"].str.len()
+        features["char_ratio"] = features["tgt_char_count"] / features["src_char_count"].clip(lower=1)
 
     # Language pair indicator
-    features["is_zh"] = (df["tgt_lang"] == "zh").astype(float)
-    features["is_de"] = (df["tgt_lang"] == "de").astype(float)
+    if "tgt_lang" in df.columns:
+        features["is_zh"] = (df["tgt_lang"] == "zh").astype(float)
+        features["is_de"] = (df["tgt_lang"] == "de").astype(float)
 
     # Cross-signal features (if multiple signals available)
     if len(signal_cols) >= 2:
@@ -101,20 +109,12 @@ def build_features(df, signal_cols):
     for col in signal_cols:
         doc_stats = df.groupby("doc_id")[col].agg(["mean", "std", "min", "max"])
         doc_stats.columns = [f"{col}_doc_{stat}" for stat in ["mean", "std", "min", "max"]]
-        # Map doc_id stats back to each row via .map() instead of .join(on=...)
         for stat_col in doc_stats.columns:
             features[stat_col] = df["doc_id"].map(doc_stats[stat_col]).values
-        # Deviation from doc mean
         features[f"{col}_doc_dev"] = df[col].values - features[f"{col}_doc_mean"].values
 
-    # xCOMET error features (token-level error analysis)
-    for col in ["xcomet_error_count", "xcomet_error_severity", "xcomet_error_confidence"]:
-        if col in df.columns:
-            features[col] = df[col].values
-
-    # Speech features if available
-    speech_feat_file = "outputs/dev_speech_features.parquet"
-    if os.path.exists(speech_feat_file):
+    # Speech features — only if explicitly passed and row count matches
+    if speech_feat_file and os.path.exists(speech_feat_file):
         speech_feats = pd.read_parquet(speech_feat_file)
         if len(speech_feats) == len(df):
             for col in speech_feats.columns:
@@ -495,9 +495,15 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     if train is not None and len(shared_signal_cols) >= 1:
         # TRAIN/EVAL MODE: Train on 33K, evaluate on 5.5K dev
+        # Use ONLY shared_signal_cols so train and dev have identical feature sets.
+        # No speech_feat_file — we don't have speech features for train.
+        # No xcomet error columns — build_features no longer adds them
+        #   (they were conditional on df columns and caused train/dev mismatch).
         print("\n--- LightGBM (trained on full train set) ---")
         train_features = build_features(train, shared_signal_cols)
         dev_features = build_features(dev, shared_signal_cols)
+        assert list(train_features.columns) == list(dev_features.columns), \
+            f"Feature mismatch: train has {train_features.shape[1]}, dev has {dev_features.shape[1]}"
         print(f"  Train features: {train_features.shape}, Dev features: {dev_features.shape}")
 
         lgbm_preds, lgbm_tau, lgbm_model = lightgbm_train_eval(
@@ -506,9 +512,10 @@ if __name__ == "__main__":
         if lgbm_preds is not None:
             dev["lgbm_score"] = lgbm_preds
     else:
-        # CV-ONLY MODE: GroupKFold on dev
+        # CV-ONLY MODE: GroupKFold on dev (can use all dev features including speech)
         print("\n--- LightGBM (5-fold CV on dev) ---")
-        dev_features = build_features(dev, dev_signal_cols)
+        dev_features = build_features(dev, dev_signal_cols,
+                                      speech_feat_file="outputs/dev_speech_features.parquet")
         print(f"  Feature matrix: {dev_features.shape}")
         lgbm_preds, lgbm_tau = lightgbm_ensemble(dev, dev_features)
         if lgbm_preds is not None:
