@@ -5,15 +5,22 @@ This script goes beyond simple weighted averaging:
 1. LightGBM gradient-boosted trees on all available signals + features
 2. Isotonic regression calibration (per language pair)
 3. Stacked generalization (meta-learner on top of base models)
-4. Score clipping and normalization to match gold distribution
+4. Direct Kendall Tau weight optimization (random search + Nelder-Mead)
+5. Score clipping and normalization to match gold distribution
 
-This is the final ensemble used for submission scoring.
+Two modes:
+  - Train/eval mode (--train-data): Train on scored train set, evaluate on dev
+  - CV-only mode (no --train-data): 5-fold GroupKFold CV on dev set only
 
-Run: python scripts/04b_ensemble_advanced.py
+Run:
+  python scripts/04b_ensemble_advanced.py --train-data outputs/train_scored.parquet
+  python scripts/04b_ensemble_advanced.py   # CV-only fallback
 """
 
 import os
 import sys
+import json
+import argparse
 import numpy as np
 import pandas as pd
 from scipy import stats, optimize
@@ -276,103 +283,308 @@ def stacked_ensemble(df, base_predictions, gold_col="score", n_folds=5):
 
 
 # ---------------------------------------------------------------------------
+# LightGBM: train on full train set, predict on dev
+# ---------------------------------------------------------------------------
+
+def lightgbm_train_eval(train_df, dev_df, train_features, dev_features,
+                        gold_col="score"):
+    """
+    Train LightGBM on full train set (33K), evaluate on dev (5.5K).
+    This is the proper train/test split — no CV leakage.
+    """
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        print("LightGBM not installed. Install with: poetry add lightgbm")
+        return None, None, None
+
+    X_train = train_features.values
+    y_train = train_df[gold_col].values
+    X_dev = dev_features.values
+    y_dev = dev_df[gold_col].values
+
+    # Use 10% of train as validation for early stopping
+    n_val = int(len(X_train) * 0.1)
+    rng = np.random.RandomState(42)
+    val_mask = rng.choice(len(X_train), n_val, replace=False)
+    train_mask = np.setdiff1d(np.arange(len(X_train)), val_mask)
+
+    lgb_params = {
+        "objective": "regression",
+        "metric": "mae",
+        "boosting_type": "gbdt",
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "verbose": -1,
+        "n_estimators": 1000,
+        "seed": 42,
+        "lambda_l1": 0.1,
+        "lambda_l2": 0.1,
+        "min_child_samples": 20,
+    }
+
+    model = lgb.LGBMRegressor(**lgb_params)
+    model.fit(
+        X_train[train_mask], y_train[train_mask],
+        eval_set=[(X_train[val_mask], y_train[val_mask])],
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+
+    # Predict on dev
+    dev_preds = model.predict(X_dev)
+    dev_df_eval = dev_df.copy()
+    dev_df_eval["lgbm_pred"] = dev_preds
+    dev_tau = kendall_tau_per_source(dev_df_eval, "lgbm_pred", gold_col)
+
+    # Train performance (sanity check)
+    train_preds = model.predict(X_train)
+    train_df_eval = train_df.copy()
+    train_df_eval["lgbm_pred"] = train_preds
+    train_tau = kendall_tau_per_source(train_df_eval, "lgbm_pred", gold_col)
+
+    print(f"  Train tau: {train_tau:.4f}, Dev tau: {dev_tau:.4f}")
+    print(f"  Gap: {train_tau - dev_tau:.4f} (target: < 0.10)")
+    print(f"  Best iteration: {model.best_iteration_}")
+
+    # Feature importance
+    feat_names = train_features.columns.tolist()
+    imp_df = pd.DataFrame({
+        "feature": feat_names,
+        "importance": model.feature_importances_,
+    }).sort_values("importance", ascending=False)
+    print("\n  Top 10 features:")
+    for _, row in imp_df.head(10).iterrows():
+        print(f"    {row['feature']}: {row['importance']:.1f}")
+
+    # Save model
+    os.makedirs("models", exist_ok=True)
+    model.booster_.save_model("models/lgbm_model.txt")
+    print(f"\n  Saved LightGBM model to models/lgbm_model.txt")
+
+    return dev_preds, dev_tau, model
+
+
+# ---------------------------------------------------------------------------
+# Direct Kendall Tau weight optimization
+# ---------------------------------------------------------------------------
+
+def optimize_weights(dev_df, signal_cols, gold_col="score", n_random=10000):
+    """
+    Find metric weights that directly maximize per-source Kendall Tau on dev.
+    Uses random search + Nelder-Mead refinement.
+    """
+    n = len(signal_cols)
+    signal_matrix = np.column_stack([dev_df[c].values for c in signal_cols])
+
+    def eval_weights(w):
+        w = np.abs(w)
+        w = w / w.sum()
+        ensemble = signal_matrix @ w
+        dev_df_tmp = dev_df.copy()
+        dev_df_tmp["_ens"] = ensemble
+        return -kendall_tau_per_source(dev_df_tmp, "_ens", gold_col)
+
+    # Random search
+    best_tau = -1
+    best_w = np.ones(n) / n
+    rng = np.random.RandomState(42)
+
+    for trial in range(n_random):
+        w = rng.dirichlet(np.ones(n))
+        tau = -eval_weights(w)
+        if tau > best_tau:
+            best_tau = tau
+            best_w = w
+            if trial < 100 or trial % 1000 == 0:
+                print(f"  Trial {trial}: tau={tau:.4f}")
+
+    print(f"\n  Best random search tau: {best_tau:.4f}")
+    print(f"  Weights: {dict(zip(signal_cols, [f'{w:.3f}' for w in best_w]))}")
+
+    # Nelder-Mead refinement
+    result = optimize.minimize(eval_weights, best_w, method="Nelder-Mead",
+                               options={"maxiter": 5000, "xatol": 1e-6})
+    final_w = np.abs(result.x)
+    final_w = final_w / final_w.sum()
+    final_tau = -result.fun
+
+    print(f"\n  Nelder-Mead tau: {final_tau:.4f}")
+    print(f"  Weights: {dict(zip(signal_cols, [f'{w:.3f}' for w in final_w]))}")
+
+    return dict(zip(signal_cols, final_w.tolist())), final_tau
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train-data", type=str, default=None,
+                        help="Path to scored train set (e.g., outputs/train_scored.parquet). "
+                             "If provided, trains on train and evaluates on dev. "
+                             "Otherwise falls back to CV on dev only.")
+    parser.add_argument("--dev-data", type=str, default="outputs/dev_with_predictions.parquet")
+    cli_args = parser.parse_args()
+
     print("=" * 80)
     print("ADVANCED ENSEMBLE PIPELINE")
     print("=" * 80)
 
-    # Load dev data with all predictions
-    pred_file = "outputs/dev_with_predictions.parquet"
-    if not os.path.exists(pred_file):
-        print(f"ERROR: {pred_file} not found.")
+    # ------------------------------------------------------------------
+    # Load dev data
+    # ------------------------------------------------------------------
+    if not os.path.exists(cli_args.dev_data):
+        print(f"ERROR: {cli_args.dev_data} not found.")
         sys.exit(1)
 
-    dev = pd.read_parquet(pred_file)
-    print(f"Loaded {len(dev)} dev examples")
-    print(f"Columns: {dev.columns.tolist()}")
+    dev = pd.read_parquet(cli_args.dev_data)
+    print(f"Dev set: {len(dev)} examples, {dev['doc_id'].nunique()} docs")
 
-    # Detect available signals
-    signal_cols = []
-    for col in ["cometkiwi22_score", "finetuned_score", "pairwise_score",
-                 "xcomet_score", "blaser_score", "sonar_cosine", "speechqe_score",
-                 "metricx_score", "cometkiwi23xxl_score"]:
-        if col in dev.columns:
-            signal_cols.append(col)
+    # ------------------------------------------------------------------
+    # Load train data (if provided)
+    # ------------------------------------------------------------------
+    train = None
+    if cli_args.train_data and os.path.exists(cli_args.train_data):
+        train = pd.read_parquet(cli_args.train_data)
+        print(f"Train set: {len(train)} examples, {train['doc_id'].nunique()} docs")
+        print(f"MODE: Train on {len(train)} samples, evaluate on {len(dev)} dev samples")
+    else:
+        if cli_args.train_data:
+            print(f"WARNING: {cli_args.train_data} not found, falling back to CV mode")
+        print(f"MODE: 5-fold GroupKFold CV on dev only ({len(dev)} samples)")
 
-    print(f"\nAvailable signals: {signal_cols}")
+    # ------------------------------------------------------------------
+    # Detect available signals (intersection of train + dev columns)
+    # ------------------------------------------------------------------
+    ALL_SIGNALS = [
+        "cometkiwi22_score", "finetuned_score", "pairwise_score",
+        "xcomet_score", "blaser_score", "sonar_cosine", "speechqe_score",
+        "metricx_score", "cometkiwi23xxl_score",
+    ]
 
-    if len(signal_cols) < 1:
+    dev_signal_cols = [c for c in ALL_SIGNALS if c in dev.columns]
+
+    if train is not None:
+        # For LGBM: use only signals present in BOTH train and dev
+        # finetuned_score and pairwise_score are NOT in train (circular — trained on train gold)
+        shared_signal_cols = [c for c in ALL_SIGNALS if c in dev.columns and c in train.columns]
+        print(f"\nDev signals ({len(dev_signal_cols)}): {dev_signal_cols}")
+        print(f"Shared train+dev signals ({len(shared_signal_cols)}): {shared_signal_cols}")
+    else:
+        shared_signal_cols = dev_signal_cols
+
+    if len(dev_signal_cols) < 1:
         print("ERROR: No signals available.")
         sys.exit(1)
 
-    # Evaluate individual signals
-    print("\n--- Individual Signal Performance ---")
-    for col in signal_cols:
+    # ------------------------------------------------------------------
+    # Evaluate individual signals on dev
+    # ------------------------------------------------------------------
+    print("\n--- Individual Signal Performance (dev) ---")
+    for col in dev_signal_cols:
         tau = kendall_tau_per_source(dev, col, "score")
         spa = soft_pairwise_accuracy(dev, col, "score")
         print(f"  {col}: per-source tau={tau:.4f}, spa={spa:.4f}")
 
-    # Build features
-    print("\n--- Building Features ---")
-    features = build_features(dev, signal_cols)
-    print(f"Feature matrix: {features.shape}")
-
+    # ------------------------------------------------------------------
     # Method 1: LightGBM
-    print("\n--- LightGBM Ensemble ---")
-    lgbm_preds, lgbm_tau = lightgbm_ensemble(dev, features)
-    if lgbm_preds is not None:
-        dev["lgbm_score"] = lgbm_preds
+    # ------------------------------------------------------------------
+    if train is not None and len(shared_signal_cols) >= 1:
+        # TRAIN/EVAL MODE: Train on 33K, evaluate on 5.5K dev
+        print("\n--- LightGBM (trained on full train set) ---")
+        train_features = build_features(train, shared_signal_cols)
+        dev_features = build_features(dev, shared_signal_cols)
+        print(f"  Train features: {train_features.shape}, Dev features: {dev_features.shape}")
 
-    # Method 2: Calibrated predictions
+        lgbm_preds, lgbm_tau, lgbm_model = lightgbm_train_eval(
+            train, dev, train_features, dev_features
+        )
+        if lgbm_preds is not None:
+            dev["lgbm_score"] = lgbm_preds
+    else:
+        # CV-ONLY MODE: GroupKFold on dev
+        print("\n--- LightGBM (5-fold CV on dev) ---")
+        dev_features = build_features(dev, dev_signal_cols)
+        print(f"  Feature matrix: {dev_features.shape}")
+        lgbm_preds, lgbm_tau = lightgbm_ensemble(dev, dev_features)
+        if lgbm_preds is not None:
+            dev["lgbm_score"] = lgbm_preds
+
+    # ------------------------------------------------------------------
+    # Method 2: Isotonic calibration (always on dev via CV)
+    # ------------------------------------------------------------------
     print("\n--- Isotonic Calibration ---")
-    for col in signal_cols:
+    for col in dev_signal_cols:
         cal_col = f"{col}_calibrated"
         dev[cal_col] = calibrate_predictions(dev, col, "score")
         cal_tau = kendall_tau_per_source(dev, cal_col, "score")
         print(f"  {col} calibrated tau: {cal_tau:.4f}")
 
-    # Method 3: Stacked meta-learner
-    if len(signal_cols) >= 2:
+    # ------------------------------------------------------------------
+    # Method 3: Stacked meta-learner (CV on dev)
+    # ------------------------------------------------------------------
+    if len(dev_signal_cols) >= 2:
         print("\n--- Stacked Meta-Learner ---")
-        base_preds = [dev[col].values for col in signal_cols]
+        base_preds = [dev[col].values for col in dev_signal_cols]
         meta_preds, meta_tau = stacked_ensemble(dev, base_preds)
         dev["meta_score"] = meta_preds
 
+    # ------------------------------------------------------------------
+    # Method 4: Direct Kendall Tau weight optimization on dev
+    # ------------------------------------------------------------------
+    print("\n--- Direct Kendall Tau Weight Optimization (dev) ---")
+    opt_weights, opt_tau = optimize_weights(dev, dev_signal_cols)
+
+    # Apply optimized weights to dev
+    ensemble_score = np.zeros(len(dev))
+    for col, w in opt_weights.items():
+        ensemble_score += dev[col].values * w
+    dev["weighted_ensemble_score"] = ensemble_score
+
+    # Save weights for submission
+    os.makedirs("outputs", exist_ok=True)
+    with open("outputs/ensemble_weights.json", "w") as f:
+        json.dump(opt_weights, f, indent=2)
+    print(f"  Saved ensemble weights to outputs/ensemble_weights.json")
+
+    # ------------------------------------------------------------------
     # Final comparison
+    # ------------------------------------------------------------------
     print("\n" + "=" * 80)
-    print("FINAL COMPARISON")
+    print("FINAL COMPARISON (all methods evaluated on dev)")
     print("=" * 80)
 
-    eval_cols = signal_cols.copy()
+    eval_cols = dev_signal_cols.copy()
     if "lgbm_score" in dev.columns:
         eval_cols.append("lgbm_score")
     if "meta_score" in dev.columns:
         eval_cols.append("meta_score")
+    if "weighted_ensemble_score" in dev.columns:
+        eval_cols.append("weighted_ensemble_score")
 
     print(f"\n{'Method':<30} {'Per-src Tau':>12} {'Overall Tau':>12} {'SPA':>8}")
-    print("-" * 62)
-    for col in eval_cols:
-        tau = kendall_tau_per_source(dev, col, "score")
-        overall_tau, _ = stats.kendalltau(dev[col].values, dev["score"].values)
-        spa = soft_pairwise_accuracy(dev, col, "score")
-        print(f"  {col:<28} {tau:>12.4f} {overall_tau:>12.4f} {spa:>8.4f}")
-
-    # Save final ensemble
-    dev.to_parquet("outputs/dev_ensemble_advanced.parquet", index=False)
-    print(f"\nSaved to outputs/dev_ensemble_advanced.parquet")
-
-    # Determine best method for submission
+    print("-" * 66)
     best_col = None
     best_tau = -1
     for col in eval_cols:
         tau = kendall_tau_per_source(dev, col, "score")
+        overall_tau, _ = stats.kendalltau(dev[col].values, dev["score"].values)
+        spa = soft_pairwise_accuracy(dev, col, "score")
+        marker = ""
         if tau > best_tau:
             best_tau = tau
             best_col = col
-    print(f"\nBest method: {best_col} (per-source tau={best_tau:.4f})")
+        print(f"  {col:<28} {tau:>12.4f} {overall_tau:>12.4f} {spa:>8.4f}")
+
+    print(f"\n  >>> Best method: {best_col} (per-source tau={best_tau:.4f})")
+
+    # Save final ensemble
+    dev.to_parquet("outputs/dev_ensemble_advanced.parquet", index=False)
+    print(f"\nSaved to outputs/dev_ensemble_advanced.parquet")
 
     print("\n" + "=" * 80)
     print("ADVANCED ENSEMBLE COMPLETE")

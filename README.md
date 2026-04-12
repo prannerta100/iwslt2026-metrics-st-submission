@@ -1,7 +1,61 @@
-# iwslt2026-metrics-st-submission
+# IWSLT 2026 Metrics Shared Task Submission
 
+## MetricX-24 Research and Implementation
 
-## Speech Translation Metrics track
+This repository contains comprehensive research, implementation guides, and winning strategies for using Google's MetricX-24 in the IWSLT 2026 Metrics Shared Task.
+
+## Quick Links
+
+- **Main Research Report:** [metricx_research_report.md](metricx_research_report.md) - Complete technical details
+- **Winning Strategy:** [metricx_winning_strategy.md](metricx_winning_strategy.md) - Competition approach
+- **Metrics Comparison:** [metrics_comparison.md](metrics_comparison.md) - MetricX vs others
+- **Setup Script:** [metricx_setup.sh](metricx_setup.sh) - One-command installation
+- **Example Code:** [metricx_inference_example.py](metricx_inference_example.py) - Working examples
+
+## Quick Start
+
+```bash
+# 1. Install MetricX-24
+./metricx_setup.sh
+
+# 2. Run example inference
+cd metricx
+python ../metricx_inference_example.py
+
+# 3. Read the winning strategy
+cat metricx_winning_strategy.md
+```
+
+## Key Findings
+
+### MetricX-24 is State-of-the-Art
+- **Best correlation with human judgments:** 0.59-0.69 segment-level (WMT'24 winner)
+- **Hybrid capability:** Single model for reference-based AND reference-free (QE)
+- **Robust to speech translation errors:** Trained on undertranslation, overtranslation, gibberish
+- **Fits 96GB GPU:** XXL-bfloat16 model is only 24GB
+
+### Available Models
+- `google/metricx-24-hybrid-xxl-v2p6-bfloat16` - **Recommended** (13B, 24GB)
+- `google/metricx-24-hybrid-xl-v2p6` - Fast alternative (3.7B, 14GB)
+- `google/metricx-24-hybrid-large-v2p6` - Fastest (1.2B, 4.5GB)
+
+### Quick Inference
+
+```python
+from metricx24 import models
+import transformers
+
+model = models.MT5ForRegression.from_pretrained(
+    "google/metricx-24-hybrid-xxl-v2p6-bfloat16"
+)
+# Reference-based: score = evaluate(source, hypothesis, reference)
+# Reference-free: score = evaluate(source, hypothesis, reference="")
+# Score: 0-25 (lower is better, 0=perfect)
+```
+
+---
+
+## Speech Translation Metrics Track (Original Description)
 
 ### Description
 Speech translation has been a core focus of IWSLT for years, yet its evaluation remains underexplored. Most existing evaluations assume gold segmentation, an unrealistic scenario for real-world systems. When defering to automatically segmented speech, conventional text-to-text metrics become less reliable. Despite this, current evaluation practices still rely heavily on these metrics, highlighting the need for more robust and realistic assessment approaches.
