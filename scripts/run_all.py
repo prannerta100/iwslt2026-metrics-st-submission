@@ -213,19 +213,27 @@ if args.phase <= 3 and not args.skip_finetune:
     print("  Produces finetuned_score and pairwise_score on dev.")
     print("=" * 70)
 
-    # 3a. MSE fine-tuning
+    # 3a. MSE fine-tuning (CometKiwi-22)
     run_step(
-        "CometKiwi fine-tune (MSE loss)",
+        "CometKiwi-22 fine-tune (MSE loss)",
         "poetry run python scripts/03_finetune_cometkiwi.py",
         critical=False,
     )
 
-    # 3b. Pairwise ranking fine-tuning
+    # 3b. Pairwise ranking fine-tuning (CometKiwi-22)
     run_step(
-        "CometKiwi fine-tune (pairwise ranking loss)",
+        "CometKiwi-22 fine-tune (pairwise ranking loss)",
         "poetry run python scripts/03b_finetune_pairwise.py --epochs 10 --batch-size 32",
         critical=False,
     )
+
+    # 3c. Pairwise ranking fine-tuning (CometKiwi-23-XXL, 10.7B params)
+    if not args.skip_cometkiwi23xxl:
+        run_step(
+            "CometKiwi-23-XXL fine-tune (pairwise ranking, 10.7B params)",
+            "poetry run python scripts/12_finetune_cometkiwi23xxl.py --epochs 5 --batch-size 8 --grad-accum 4",
+            critical=False,
+        )
 
 
 # =========================================================================

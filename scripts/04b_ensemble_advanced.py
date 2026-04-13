@@ -463,7 +463,7 @@ if __name__ == "__main__":
     ALL_SIGNALS = [
         "cometkiwi22_score", "finetuned_score", "pairwise_score",
         "xcomet_score", "blaser_score", "sonar_cosine", "speechqe_score",
-        "metricx_score", "cometkiwi23xxl_score",
+        "metricx_score", "cometkiwi23xxl_score", "cometkiwi23xxl_finetuned_score",
     ]
 
     dev_signal_cols = [c for c in ALL_SIGNALS if c in dev.columns]

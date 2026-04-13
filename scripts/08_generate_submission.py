@@ -139,6 +139,29 @@ try:
 except Exception as e:
     print(f"  CometKiwi-23-XXL not available: {e}")
 
+# --- Fine-tuned CometKiwi-23-XXL (if available) ---
+ck23xxl_ft_ckpt = None
+if os.path.exists("models/cometkiwi23xxl_pairwise/"):
+    import glob as _glob
+    ckpts = _glob.glob("models/cometkiwi23xxl_pairwise/*.ckpt")
+    if ckpts:
+        ck23xxl_ft_ckpt = sorted(ckpts)[-1]
+
+if ck23xxl_ft_ckpt:
+    try:
+        print(f"\n--- Fine-tuned CometKiwi-23-XXL ({ck23xxl_ft_ckpt}) ---")
+        model_path = download_model("Unbabel/wmt23-cometkiwi-da-xxl")
+        model = load_from_checkpoint(model_path)
+        state_dict = torch.load(ck23xxl_ft_ckpt, map_location="cpu", weights_only=False)
+        model.load_state_dict(state_dict)
+        output = model.predict(samples, batch_size=32, gpus=gpus, num_workers=num_workers)
+        ft_scores = output.scores if hasattr(output, "scores") else output["scores"]
+        test["cometkiwi23xxl_finetuned_score"] = ft_scores
+        print(f"  Score range: [{min(ft_scores):.4f}, {max(ft_scores):.4f}]")
+        del model
+    except Exception as e:
+        print(f"  Fine-tuned CK-23-XXL not available: {e}")
+
 # --- MetricX-24 (if available) ---
 try:
     print("\n--- MetricX-24-Hybrid-XXL ---")

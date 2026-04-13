@@ -1,5 +1,24 @@
 # IWSLT 2026 Metrics Shared Task — Full Pipeline Flowchart
 
+## How to Run (End to End from Scratch)
+
+```bash
+# FULL PIPELINE (everything from scratch, ~4-6 hours on Blackwell 96GB)
+poetry run python scripts/run_all.py
+
+# FULL PIPELINE (skip 71GB download if data already exists)
+poetry run python scripts/run_all.py --skip-download
+
+# RESUME FROM A SPECIFIC PHASE (e.g., after Phase 3 completes)
+poetry run python scripts/run_all.py --phase 4 --skip-download
+
+# GENERATE SUBMISSION (when test data is released)
+poetry run python scripts/run_all.py --phase 6 --test-data path/to/test.parquet
+
+# SKIP SPECIFIC MODELS (if they fail or take too long)
+poetry run python scripts/run_all.py --skip-download --skip-metricx --skip-blaser
+```
+
 ## Task
 
 Predict human quality scores (0-100) for speech translation outputs.
@@ -135,12 +154,13 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
                     ▼
  ┌─────────────────────────────────────────────────────────────────────────────┐
  │                                                                             │
- │  PHASE 3: FINE-TUNE COMETKIWI-22 ON TRAIN, SCORE DEV                       │
+ │  PHASE 3: FINE-TUNE COMET MODELS ON TRAIN, SCORE DEV                        │
  │                                                                             │
- │  ONLY CometKiwi-22 is fine-tuned. The other 4 metrics are used as-is.      │
- │  Both scripts below start from the SAME base model (CometKiwi-22) and      │
- │  produce TWO SEPARATE fine-tuned models with different training objectives. │
- │  Both train ONE multilingual model (NOT separate models for de and zh).     │
+ │  Three fine-tuning runs on two base models:                                 │
+ │    - CometKiwi-22 (550M) fine-tuned with MSE loss (script 03)              │
+ │    - CometKiwi-22 (550M) fine-tuned with pairwise ranking (script 03b)     │
+ │    - CometKiwi-23-XXL (10.7B) fine-tuned with pairwise ranking (script 12) │
+ │  All train ONE multilingual model (NOT separate models for de and zh).      │
  │                                                                             │
  │  ┌─ 03_finetune_cometkiwi.py ─────────────────────────────────────────┐    │
  │  │                                                                    │    │
@@ -202,9 +222,38 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
  │  │  Merges into dev_with_predictions.parquet                          │    │
  │  └────────────────────────────────────────────────────────────────────┘    │
  │                                                                             │
- │  Result: dev_with_predictions.parquet now has 6 + 2 = 8 signal columns:    │
+ │  ┌─ 12_finetune_cometkiwi23xxl.py ────────────────────────────────────┐   │
+ │  │                                                                    │    │
+ │  │  WHAT:   Fine-tune CometKiwi-23-XXL with pairwise ranking loss    │    │
+ │  │          10.7B params — much more capacity than CometKiwi-22       │    │
+ │  │                                                                    │    │
+ │  │  BASE:   Unbabel/wmt23-cometkiwi-da-xxl (XLM-R XXL, 48 layers)   │    │
+ │  │                                                                    │    │
+ │  │  TRAIN DATA:                                                       │    │
+ │  │    - Same as 03b: train_text (en-de, en-zh) + synthetic, as pairs │    │
+ │  │    - 50K within-document pairs, score diff > 1.0                   │    │
+ │  │                                                                    │    │
+ │  │  LOSS:   0.7 * adaptive_margin_ranking + 0.3 * MSE (same as 03b) │    │
+ │  │                                                                    │    │
+ │  │  TRAINING (adapted for 10.7B model on 102GB VRAM):                │    │
+ │  │    - Custom PyTorch loop with bf16 autocast + GradScaler           │    │
+ │  │    - Phase 1: Encoder fully frozen, train head only (35.7M params)│    │
+ │  │      batch=8 pairs, 5 epochs, head_lr=5e-6                        │    │
+ │  │    - Phase 2: Unfreeze top 4 encoder layers (~890M params)         │    │
+ │  │      + gradient checkpointing, enc_lr=1e-7                         │    │
+ │  │    - Gradient accumulation: 4 steps (effective batch=32)           │    │
+ │  │    - Early stopping: patience=3 on per-source Kendall Tau          │    │
+ │  │                                                                    │    │
+ │  │  OUTPUT MODEL: models/cometkiwi23xxl_pairwise/best-*.ckpt         │    │
+ │  │                                                                    │    │
+ │  │  AFTER TRAINING: Scores dev → cometkiwi23xxl_finetuned_score      │    │
+ │  │  Merges into dev_with_predictions.parquet                          │    │
+ │  └────────────────────────────────────────────────────────────────────┘    │
+ │                                                                             │
+ │  Result: dev_with_predictions.parquet now has 6 + 3 = 9 signal columns:    │
  │    cometkiwi22_score, xcomet_score, blaser_score, sonar_cosine,             │
- │    metricx_score, cometkiwi23xxl_score, finetuned_score, pairwise_score     │
+ │    metricx_score, cometkiwi23xxl_score,                                     │
+ │    finetuned_score, pairwise_score, cometkiwi23xxl_finetuned_score          │
  │                                                                             │
  └─────────────────────────────────────────────────────────────────────────────┘
                     │
@@ -274,7 +323,7 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
  │  Script: 08_generate_submission.py                                          │
  │                                                                             │
  │  Input:  test set parquet (provided via --test-data)                         │
- │  Models: All 7 metric models + ensemble weights from Phase 5                │
+ │  Models: All 8 metric models + ensemble weights from Phase 5                │
  │                                                                             │
  │  Steps:                                                                     │
  │    1. Score test with CometKiwi-22 (pretrained)                             │
@@ -282,10 +331,11 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
  │    3. Score test with CometKiwi-22 fine-tuned pairwise (from 03b)           │
  │    4. Score test with xCOMET-XL (pretrained)                                │
  │    5. Score test with CometKiwi-23-XXL (pretrained)                         │
- │    6. Score test with MetricX-24 (pretrained)                               │
- │    7. Score test with BLASER-2 (pretrained)                                 │
- │    8. Apply ensemble weights from outputs/ensemble_weights.json             │
- │    9. Write final_score per sample                                          │
+ │    6. Score test with CometKiwi-23-XXL fine-tuned pairwise (from 12)        │
+ │    7. Score test with MetricX-24 (pretrained)                               │
+ │    8. Score test with BLASER-2 (pretrained)                                 │
+ │    9. Apply ensemble weights from outputs/ensemble_weights.json             │
+ │   10. Write final_score per sample                                          │
  │                                                                             │
  │  Output:                                                                    │
  │    submission/scores.txt          (one score per line, 6 decimal places)    │
@@ -332,26 +382,30 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
               │          │            │
     ┌─────────┼──────────┘            │
     │         │                       │
-    │   PHASE 3: Fine-tune CometKiwi-22 (THE ONLY MODEL FINE-TUNED)
+    │   PHASE 3: Fine-tune COMET models (3 runs on 2 base models)
     │         │                       │
     │    train_text (en-de, en-zh)    │
     │    + synthetic data             │
     │         │                       │
-    │    [03] CometKiwi-22            │
+    │    [03] CometKiwi-22 (550M)     │
     │    + MSE loss ─── score dev ────┤──→ finetuned_score
     │    ONE model, all LPs           │
     │         │                       │
-    │    [03b] CometKiwi-22           │
+    │    [03b] CometKiwi-22 (550M)    │
     │    + pairwise ranking ── score ─┤──→ pairwise_score
-    │    loss, 50K pairs              │
-    │    ONE model, all LPs           │
+    │    50K pairs                    │
+    │         │                       │
+    │    [12] CometKiwi-23-XXL (10.7B)│
+    │    + pairwise ranking ── score ─┤──→ cometkiwi23xxl_finetuned_score
+    │    bf16, grad checkpointing     │
+    │    freeze encoder → unfreeze 4  │
     │         │                       │
     │         │                       ▼
-    │         │              dev_with_predictions.parquet (now 8 columns)
+    │         │              dev_with_predictions.parquet (now 9 columns)
     │         │                       │
     │   PHASE 4: Score TRAIN          │
     │   with 5 base metrics           │
-    │   (NOT finetuned/pairwise       │
+    │   (NOT finetuned models         │
     │    — that would be leakage)     │
     │         │                       │
     │    [11] CometKiwi-22            │
@@ -368,7 +422,7 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
     │                   │
     │         PHASE 5: Ensemble
     │         [04b] Train LightGBM on 33K (5 signals)
-    │                Optimize weights on dev (8 signals)
+    │                Optimize weights on dev (9 signals)
     │                   │
     │                   ├──→ outputs/ensemble_weights.json
     │                   ├──→ models/lgbm_model.txt
@@ -381,13 +435,13 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
     │                   └────────┬─────────┘
     │                            │
     │              PHASE 6: [08] Generate submission
-    │              Score test with ALL 7 models
+    │              Score test with ALL 8 models
     │              Apply ensemble weights
     │                            │
     │                            ▼
     │                 submission/scores.txt
     │
-    └─ NOTE: Fine-tuned models (03, 03b) score TEST in Phase 6
+    └─ NOTE: Fine-tuned models (03, 03b, 12) score TEST in Phase 6
        but do NOT score train in Phase 4 (circular dependency)
 ```
 
@@ -405,6 +459,7 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
 | `10_cometkiwi23xxl_inference.py` | 2 | Run pretrained CometKiwi-23-XXL on dev | dev_text.parquet | merges cometkiwi23xxl_score | Yes |
 | `03_finetune_cometkiwi.py` | 3 | Fine-tune CometKiwi-22 with MSE loss, then score dev | train_text (en-de,zh) + synthetic (en-de) | model ckpt + finetuned_score on dev | Yes |
 | `03b_finetune_pairwise.py` | 3 | Fine-tune CometKiwi-22 with pairwise ranking, then score dev | train_text (en-de,zh) + synthetic (en-de,zh) as 50K pairs | model ckpt + pairwise_score on dev | Yes |
+| `12_finetune_cometkiwi23xxl.py` | 3 | Fine-tune CometKiwi-23-XXL (10.7B) with pairwise ranking | train_text (en-de,zh) + synthetic as 50K pairs | model ckpt + cometkiwi23xxl_finetuned_score on dev | Yes (40GB+) |
 | `11_score_train.py` | 4 | Run 5 pretrained metrics on full 33K train set | train_text.parquet | train_scored.parquet (5 base scores) | Yes |
 | `04b_ensemble_advanced.py` | 5 | Train LightGBM on 33K, optimize weights on dev | train_scored + dev_with_predictions | ensemble_weights.json + lgbm_model.txt | No |
 | `08_generate_submission.py` | 6 | Score test with all 7 models, apply ensemble | test.parquet + models + weights | submission/scores.txt | Yes |
@@ -423,6 +478,7 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
 | `cometkiwi23xxl_score` | CometKiwi-23-XXL | No (pretrained) | Yes | Yes | ~0.3-0.95 | Larger XLM-R encoder |
 | `finetuned_score` | CometKiwi-22 + MSE | **Yes** (script 03) | **No** (leakage) | Yes | ~0.3-0.95 | Trained on train gold scores |
 | `pairwise_score` | CometKiwi-22 + ranking | **Yes** (script 03b) | **No** (leakage) | Yes | ~0.3-0.95 | Trained on within-doc pairs |
+| `cometkiwi23xxl_finetuned_score` | CometKiwi-23-XXL + ranking | **Yes** (script 12) | **No** (leakage) | Yes | ~0.3-0.95 | 10.7B params, pairwise ranking |
 
 ---
 
@@ -436,4 +492,4 @@ And 2 FINE-TUNED models (both starting from CometKiwi-22 as base):
 
 4. **Ensemble overfitting**: With only 880 docs in dev, LightGBM overfits severely (train tau=0.82, CV tau=0.36). Phase 4 (scoring 33K train) is designed to fix this.
 
-5. **Only one model is fine-tuned**: CometKiwi-22 is the only model we fine-tune (two variants). Fine-tuning xCOMET, MetricX, or CK-23-XXL could improve results but requires significant engineering.
+5. **MetricX requires manual setup**: `bash scripts/setup_metricx.sh` must run before MetricX inference. The `metricx24` package has no PyPI release — it's cloned to `/tmp/metricx` and added to PYTHONPATH.
