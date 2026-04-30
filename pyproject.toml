@@ -36,6 +36,9 @@ torchcodec = "*"
 # Ensemble
 lightgbm = "*"
 
+# LLM baseline
+openai = ">=1.0.0"
+
 # Utilities
 pandas = "*"
 matplotlib = "*"

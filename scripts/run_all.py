@@ -162,6 +162,16 @@ if args.phase <= 2:
             critical=False,
         )
 
+    # LLM-as-Judge baseline (debate prompt, uses WEBEX_TOKEN)
+    if os.environ.get("WEBEX_TOKEN"):
+        run_step(
+            "LLM-as-Judge debate baseline (dev)",
+            "poetry run python scripts/16_llm_baseline.py --dataset dev --max-workers 30",
+            critical=False,
+        )
+    else:
+        print("  Skipping LLM baseline: WEBEX_TOKEN not set")
+
     require_file("outputs/dev_with_predictions.parquet")
 
 
@@ -265,6 +275,14 @@ if args.phase <= 6:
         critical=True,
     )
 
+    # LLM-as-Judge on test (if token available)
+    if os.environ.get("WEBEX_TOKEN"):
+        run_step(
+            "LLM-as-Judge debate baseline (test, 48K samples)",
+            "poetry run python scripts/16_llm_baseline.py --dataset test --max-workers 50",
+            critical=False,
+        )
+
     require_file("submission/test_predictions.parquet",
                  "13_submit_test.py should have created this")
 
@@ -292,6 +310,16 @@ if args.phase <= 7:
 
 
 # =========================================================================
+# REPORT: Generate results report JSON
+# =========================================================================
+run_step(
+    "Generate results report (outputs/results_report.json)",
+    "poetry run python scripts/17_generate_report.py",
+    critical=False,
+)
+
+
+# =========================================================================
 # Summary
 # =========================================================================
 total_time = time.time() - pipeline_start
@@ -314,6 +342,16 @@ if os.path.isdir("submission"):
             n_lines = sum(1 for _ in open(os.path.join("submission", f)))
             print(f"  submission/{f:35s} {n_lines:>6} scores, {size/1024:>6.1f} KB")
 
+# Print report summary
+report_file = "outputs/results_report.json"
+if os.path.exists(report_file):
+    import json as _json
+    with open(report_file) as _f:
+        report = _json.load(_f)
+    print(f"\nRESULTS (best method = {report['best_method']}, tau={report['best_tau']:.4f}):")
+    for m in report["methods"][:5]:
+        print(f"  {m['name']:<35} tau={m['tau_per_source']:.4f}")
+
 print("\nTo submit:")
-print("  1. submission/scores_ende.txt  →  en-de language pair")
-print("  2. submission/scores_enzh.txt  →  en-zh language pair")
+print("  1. submission/scores_ende.txt  ->  en-de language pair")
+print("  2. submission/scores_enzh.txt  ->  en-zh language pair")
