@@ -1,51 +1,26 @@
 """
 Master pipeline: IWSLT 2026 Metrics Shared Task.
 
-Runs the entire pipeline from scratch in logical phases:
+End-to-end: from data download → training → test scoring → final submission files.
 
-  PHASE 1 — Data: Download HF dataset, extract text columns
+  PHASE 1 — Data: Download train/dev from HF, extract text columns
   PHASE 2 — Score DEV: Run all QE metrics on dev set (5.5K samples)
-  PHASE 3 — Fine-tune: Train CometKiwi on train set (33K), score dev
+  PHASE 3 — Fine-tune: Train CometKiwi models on train set, score dev
   PHASE 4 — Score TRAIN: Run all QE metrics on train set (33K samples)
   PHASE 5 — Ensemble: Train LightGBM on scored train, evaluate on dev
-  PHASE 6 — Submission: Score test set, apply ensemble, write scores.txt
+  PHASE 6 — Score TEST: Load test set from HF, score with all metrics
+  PHASE 7 — Submission: Apply LightGBM to test, generate per-LP submission files
 
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  HF Dataset (71GB)                                                 │
-  │       │                                                            │
-  │       ▼                                                            │
-  │  01d: Extract text ──→ train_text.parquet (33K)                    │
-  │                    ──→ dev_text.parquet (5.5K)                     │
-  │       │                      │                                     │
-  │       │    ┌─────────────────┤                                     │
-  │       │    │  PHASE 2: Score DEV with 5 metrics                    │
-  │       │    │  02 → cometkiwi22_score                               │
-  │       │    │  05 → xcomet_score                                    │
-  │       │    │  06 → blaser_score, sonar_cosine                      │
-  │       │    │  09 → metricx_score                                   │
-  │       │    │  10 → cometkiwi23xxl_score                            │
-  │       │    │         │                                             │
-  │       │    │  PHASE 3: Fine-tune on TRAIN, score DEV               │
-  │       │    │  03  → finetuned_score                                │
-  │       │    │  03b → pairwise_score                                 │
-  │       │    │         │                                             │
-  │       │    │         ▼                                             │
-  │       │    │  dev_with_predictions.parquet (5.5K × 8 scores)       │
-  │       │    │                                                       │
-  │       ▼    │  PHASE 4: Score TRAIN with all metrics                │
-  │  11: Score train ──→ train_scored.parquet (33K × 8 scores)         │
-  │       │    │                                                       │
-  │       │    │  PHASE 5: Ensemble                                    │
-  │       │    │  04b: Train LightGBM on 33K train, eval on 5.5K dev  │
-  │       │    │         │                                             │
-  │       ▼    ▼         ▼                                             │
-  │  PHASE 6: 08 → submission/scores.txt                               │
-  └─────────────────────────────────────────────────────────────────────┘
+Submission format (from organizers):
+  - One file per language pair (en-de, en-zh)
+  - One score per line, same order as rows appear in the HF test dataset for that LP
+  - Score is a single number (parseable by json.loads)
 
 Run on GPU VM:
-  poetry run python scripts/run_all.py
-  poetry run python scripts/run_all.py --skip-download   # if data exists
-  poetry run python scripts/run_all.py --phase 4         # resume from phase 4
+  poetry run python scripts/run_all.py                     # Full pipeline from scratch
+  poetry run python scripts/run_all.py --phase 6           # Resume at test scoring
+  poetry run python scripts/run_all.py --skip-download     # Skip data download
+  poetry run python scripts/run_all.py --skip-metricx      # Skip MetricX (slow)
 """
 
 import os
@@ -58,7 +33,7 @@ parser = argparse.ArgumentParser(
     description="IWSLT 2026 Metrics — full pipeline from scratch to submission"
 )
 parser.add_argument("--phase", type=int, default=1,
-                    help="Start from this phase (1-6). Use to resume after failure.")
+                    help="Start from this phase (1-7). Use to resume after failure.")
 parser.add_argument("--skip-download", action="store_true",
                     help="Skip Phase 1 (data download)")
 parser.add_argument("--skip-xcomet", action="store_true",
@@ -73,8 +48,6 @@ parser.add_argument("--skip-speech", action="store_true",
                     help="Skip Whisper speech features (requires audio files)")
 parser.add_argument("--skip-finetune", action="store_true",
                     help="Skip CometKiwi fine-tuning")
-parser.add_argument("--test-data", type=str, default=None,
-                    help="Path to test set for Phase 6 submission generation")
 parser.add_argument("--batch-size", type=int, default=128,
                     help="Default batch size for COMET models")
 args = parser.parse_args()
@@ -95,15 +68,13 @@ def run_step(name, cmd, critical=True):
 
     elapsed = time.time() - start
     if result.returncode != 0:
-        status = "FAILED"
         if critical:
-            print(f"\n  ✗ {name} FAILED (exit code {result.returncode}) — aborting")
+            print(f"\n  FAILED: {name} (exit code {result.returncode}) — aborting")
             sys.exit(1)
         else:
-            print(f"\n  ✗ {name} FAILED (non-critical, continuing)")
+            print(f"\n  FAILED: {name} (non-critical, continuing)")
     else:
-        status = f"done in {elapsed:.0f}s"
-        print(f"\n  ✓ {name} — {status}")
+        print(f"\n  OK: {name} — {elapsed:.0f}s")
 
     return result.returncode == 0
 
@@ -122,7 +93,7 @@ def require_file(path, hint=""):
 pipeline_start = time.time()
 
 print("=" * 70)
-print("  IWSLT 2026 METRICS — FULL PIPELINE")
+print("  IWSLT 2026 METRICS — FULL PIPELINE (PHASES 1-7)")
 print("=" * 70)
 
 
@@ -140,7 +111,6 @@ if args.phase <= 1 and not args.skip_download:
         critical=True,
     )
 
-# Verify data exists
 require_file("outputs/dev_text.parquet", "Run without --skip-download")
 require_file("outputs/train_text.parquet", "Run without --skip-download")
 
@@ -151,18 +121,14 @@ require_file("outputs/train_text.parquet", "Run without --skip-download")
 if args.phase <= 2:
     print("\n" + "=" * 70)
     print("  PHASE 2: SCORE DEV SET WITH BASE METRICS")
-    print("  Each metric scores dev_text.parquet independently.")
-    print("  Results merge into dev_with_predictions.parquet.")
     print("=" * 70)
 
-    # 2a. CometKiwi-22 (baseline, creates dev_with_predictions.parquet)
     run_step(
         "CometKiwi-22 baseline (creates dev_with_predictions.parquet)",
-        f"poetry run python scripts/02_cometkiwi_baseline.py",
+        "poetry run python scripts/02_cometkiwi_baseline.py",
         critical=True,
     )
 
-    # 2b. xCOMET-XL
     if not args.skip_xcomet:
         run_step(
             "xCOMET-XL inference (dev)",
@@ -170,7 +136,6 @@ if args.phase <= 2:
             critical=False,
         )
 
-    # 2c. BLASER-2 QE (text-text mode)
     if not args.skip_blaser:
         run_step(
             "BLASER-2 QE inference (dev, text-text)",
@@ -178,9 +143,7 @@ if args.phase <= 2:
             critical=False,
         )
 
-    # 2d. MetricX-24-Hybrid-XXL
     if not args.skip_metricx:
-        # Setup metricx repo first
         run_step(
             "MetricX-24 repo setup",
             "bash scripts/setup_metricx.sh",
@@ -192,7 +155,6 @@ if args.phase <= 2:
             critical=False,
         )
 
-    # 2e. CometKiwi-23-XXL
     if not args.skip_cometkiwi23xxl:
         run_step(
             "CometKiwi-23-XXL inference (dev)",
@@ -209,25 +171,20 @@ if args.phase <= 2:
 if args.phase <= 3 and not args.skip_finetune:
     print("\n" + "=" * 70)
     print("  PHASE 3: FINE-TUNE COMETKIWI ON TRAIN SET")
-    print("  Uses 33K train samples to fine-tune CometKiwi-22.")
-    print("  Produces finetuned_score and pairwise_score on dev.")
     print("=" * 70)
 
-    # 3a. MSE fine-tuning (CometKiwi-22)
     run_step(
         "CometKiwi-22 fine-tune (MSE loss)",
         "poetry run python scripts/03_finetune_cometkiwi.py",
         critical=False,
     )
 
-    # 3b. Pairwise ranking fine-tuning (CometKiwi-22)
     run_step(
         "CometKiwi-22 fine-tune (pairwise ranking loss)",
         "poetry run python scripts/03b_finetune_pairwise.py --epochs 10 --batch-size 32",
         critical=False,
     )
 
-    # 3c. Pairwise ranking fine-tuning (CometKiwi-23-XXL, 10.7B params)
     if not args.skip_cometkiwi23xxl:
         run_step(
             "CometKiwi-23-XXL fine-tune (pairwise ranking, 10.7B params)",
@@ -241,12 +198,9 @@ if args.phase <= 3 and not args.skip_finetune:
 # =========================================================================
 if args.phase <= 4:
     print("\n" + "=" * 70)
-    print("  PHASE 4: SCORE TRAIN SET WITH ALL METRICS")
-    print("  Scores 33K train samples so the ensemble can train on them.")
-    print("  This is critical to reduce overfitting (0.82 → 0.36 gap).")
+    print("  PHASE 4: SCORE TRAIN SET WITH ALL METRICS (33K samples)")
     print("=" * 70)
 
-    # Build skip flags from args
     skip_flags = []
     if args.skip_xcomet:
         skip_flags.append("--skip-xcomet")
@@ -256,7 +210,6 @@ if args.phase <= 4:
         skip_flags.append("--skip-metricx")
     if args.skip_cometkiwi23xxl:
         skip_flags.append("--skip-cometkiwi23xxl")
-
     skip_str = " ".join(skip_flags)
 
     run_step(
@@ -273,42 +226,69 @@ if args.phase <= 4:
 # =========================================================================
 if args.phase <= 5:
     print("\n" + "=" * 70)
-    print("  PHASE 5: ENSEMBLE")
-    print("  Train LightGBM on 33K scored train samples.")
-    print("  Evaluate on 5.5K dev samples.")
+    print("  PHASE 5: TRAIN ENSEMBLE ON SCORED TRAIN, EVALUATE ON DEV")
     print("=" * 70)
 
-    # 5a. Advanced ensemble (train on scored train set if available)
     ensemble_cmd = "poetry run python scripts/04b_ensemble_advanced.py"
     if os.path.exists("outputs/train_scored.parquet"):
         ensemble_cmd += " --train-data outputs/train_scored.parquet"
     run_step(
-        "Advanced ensemble (LightGBM + calibration + stacking)",
+        "Advanced ensemble (LightGBM + calibration + weight optimization)",
         ensemble_cmd,
         critical=True,
     )
 
 
 # =========================================================================
-# PHASE 6: Generate submission
+# PHASE 6: Score TEST set with all metrics
 # =========================================================================
-if args.phase <= 6 and args.test_data:
+if args.phase <= 6:
     print("\n" + "=" * 70)
-    print("  PHASE 6: GENERATE SUBMISSION")
-    print(f"  Scoring test set: {args.test_data}")
+    print("  PHASE 6: SCORE TEST SET WITH ALL METRICS (48K samples)")
+    print("  Dataset: maikezu/iwslt2026-metrics-shared-test")
     print("=" * 70)
 
-    require_file(args.test_data, "Provide --test-data path")
+    skip_flags = []
+    if args.skip_xcomet:
+        skip_flags.append("--skip-xcomet")
+    if args.skip_blaser:
+        skip_flags.append("--skip-blaser")
+    if args.skip_metricx:
+        skip_flags.append("--skip-metricx")
+    if args.skip_cometkiwi23xxl:
+        skip_flags.append("--skip-cometkiwi23xxl")
+    skip_str = " ".join(skip_flags)
 
     run_step(
-        "Generate submission files",
-        f"PYTHONPATH=/tmp/metricx:$PYTHONPATH poetry run python scripts/08_generate_submission.py --test-data {args.test_data}",
+        "Score test set (48K samples) with all available metrics",
+        f"PYTHONPATH=/tmp/metricx:$PYTHONPATH poetry run python scripts/13_submit_test.py --batch-size {args.batch_size} {skip_str}",
         critical=True,
     )
-elif args.phase <= 6 and not args.test_data:
-    print("\n  Phase 6 skipped: no --test-data provided.")
-    print("  When test data is released (Apr 21-30), run:")
-    print("    poetry run python scripts/run_all.py --phase 6 --test-data path/to/test.parquet")
+
+    require_file("submission/test_predictions.parquet",
+                 "13_submit_test.py should have created this")
+
+
+# =========================================================================
+# PHASE 7: Generate final submission (LightGBM + per-LP files)
+# =========================================================================
+if args.phase <= 7:
+    print("\n" + "=" * 70)
+    print("  PHASE 7: GENERATE FINAL SUBMISSION FILES")
+    print("  Trains LightGBM on scored train, predicts on scored test,")
+    print("  outputs one score file per language pair.")
+    print("=" * 70)
+
+    run_step(
+        "Train LightGBM on train, predict on test, generate per-LP submission",
+        "poetry run python scripts/15_final_submission.py",
+        critical=True,
+    )
+
+    # Verify submission files exist
+    for lp in ["ende", "enzh"]:
+        require_file(f"submission/scores_{lp}.txt",
+                     f"15_final_submission.py should have created submission/scores_{lp}.txt")
 
 
 # =========================================================================
@@ -319,16 +299,21 @@ print("\n" + "=" * 70)
 print(f"  PIPELINE COMPLETE — {total_time/60:.1f} minutes")
 print("=" * 70)
 
-# List outputs
 print("\nGenerated files:")
 if os.path.isdir("outputs"):
     for f in sorted(os.listdir("outputs")):
         if f.endswith((".parquet", ".json", ".npy")):
             size = os.path.getsize(os.path.join("outputs", f))
-            print(f"  {f:45s} {size/1024:>8.1f} KB")
+            print(f"  outputs/{f:40s} {size/1024:>8.1f} KB")
 
 if os.path.isdir("submission"):
-    print("\nSubmission files:")
+    print("\nSUBMISSION FILES (send these to organizers):")
     for f in sorted(os.listdir("submission")):
-        size = os.path.getsize(os.path.join("submission", f))
-        print(f"  {f:45s} {size/1024:>8.1f} KB")
+        if f.endswith(".txt"):
+            size = os.path.getsize(os.path.join("submission", f))
+            n_lines = sum(1 for _ in open(os.path.join("submission", f)))
+            print(f"  submission/{f:35s} {n_lines:>6} scores, {size/1024:>6.1f} KB")
+
+print("\nTo submit:")
+print("  1. submission/scores_ende.txt  →  en-de language pair")
+print("  2. submission/scores_enzh.txt  →  en-zh language pair")
