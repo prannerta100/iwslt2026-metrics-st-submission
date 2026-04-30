@@ -225,16 +225,13 @@ output_file = os.path.join(args.output_dir, f"llm_debate_{args.dataset}.parquet"
 df.to_parquet(output_file, index=False)
 print(f"\nSaved to {output_file}")
 
-# Save per-LP score files for test submission
+# Save combined score file for test submission (all LPs, original row order)
 if args.dataset == "test":
     os.makedirs("submission", exist_ok=True)
-    for lp_name, tgt_lang in [("ende", "de"), ("enzh", "zh")]:
-        lp_mask = df["tgt_lang"] == tgt_lang
-        lp_scores = df.loc[lp_mask, "llm_debate_score"].values
-        score_file = f"submission/backup_llm_debate_{lp_name}.txt"
-        with open(score_file, "w") as f:
-            for s in lp_scores:
-                f.write(f"{s:.6f}\n")
-        print(f"  {score_file}: {len(lp_scores)} scores")
+    score_file = "submission/iwslt26test_llm_debate.jsonl"
+    with open(score_file, "w") as f:
+        for s in df["llm_debate_score"].values:
+            f.write(f"{s}\n")
+    print(f"  {score_file}: {len(df)} scores (all LPs, original order)")
 
 print("\nDone.")

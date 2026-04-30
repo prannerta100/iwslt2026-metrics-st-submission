@@ -1,11 +1,14 @@
 """
 Final submission: train LightGBM on scored train, predict on scored test,
-produce per-language-pair submission files.
+produce submission file.
 
-Submission format (from organizers' evaluation script):
-  - One file per language pair
-  - One score per line (plain number, parseable by json.loads)
-  - Same row order as the HF test dataset, filtered to that LP
+Submission format (from organizers' evaluation script at
+github.com/zouharvi/iwslt26-metrics/blob/main/evaluation/__main__.py):
+  - ONE file covering ALL language pairs (not separate per-LP files)
+  - One score per line (bare number, parseable by json.loads)
+  - Same row order as the input dataset (en-de and en-zh interleaved)
+  - len(scores) must equal len(input_data)
+  - The evaluation script splits by LP internally using src_lang+tgt_lang
 
 This script:
   1. Loads scored train (outputs/train_scored.parquet) and scored test (submission/test_predictions.parquet)
@@ -14,8 +17,8 @@ This script:
   4. Trains LightGBM on all train data (with 10% holdout for early stopping)
   5. Validates on dev if available
   6. Predicts on test
-  7. Splits predictions by language pair and writes submission files
-  8. Also produces a combined fallback file (weighted ensemble without LightGBM)
+  7. Writes ONE submission file with all 48K scores in original dataset order
+  8. Also produces per-signal backup files
 
 Run:
   poetry run python scripts/15_final_submission.py
@@ -287,37 +290,30 @@ if test_preds is None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Generate per-language-pair submission files
+# 6. Generate submission file (ONE file, all LPs, original row order)
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 80)
-print("GENERATING SUBMISSION FILES")
+print("GENERATING SUBMISSION FILE")
 print("=" * 80)
 
 test["final_score"] = test_preds
 
-# Split by language pair and write in original dataset order
-# The test DataFrame preserves the original HF dataset index ordering.
-# We filter by tgt_lang and write scores in that filtered order.
+# PRIMARY SUBMISSION: one file with ALL scores in original dataset order.
+# The evaluation script reads this and splits by LP internally.
+submission_file = os.path.join(args.output_dir, "iwslt26test_lgbm_ensemble.jsonl")
+with open(submission_file, "w") as f:
+    for score in test["final_score"].values:
+        f.write(f"{score}\n")
+print(f"  {submission_file}: {len(test)} scores (ALL language pairs, original order)")
+print(f"    mean={test_preds.mean():.4f}, std={test_preds.std():.4f}, "
+      f"min={test_preds.min():.4f}, max={test_preds.max():.4f}")
 
+# Per-LP stats (informational only)
 for lp_name, tgt_lang in [("ende", "de"), ("enzh", "zh")]:
     lp_mask = test["tgt_lang"] == tgt_lang
     lp_scores = test.loc[lp_mask, "final_score"].values
-
-    score_file = os.path.join(args.output_dir, f"scores_{lp_name}.txt")
-    with open(score_file, "w") as f:
-        for score in lp_scores:
-            f.write(f"{score:.6f}\n")
-
-    print(f"  {score_file}: {len(lp_scores)} scores")
-    print(f"    mean={lp_scores.mean():.4f}, std={lp_scores.std():.4f}, "
-          f"min={lp_scores.min():.4f}, max={lp_scores.max():.4f}")
-
-# Also save a combined file (all 48K in dataset order) as backup
-combined_file = os.path.join(args.output_dir, "scores_combined.txt")
-with open(combined_file, "w") as f:
-    for score in test["final_score"].values:
-        f.write(f"{score:.6f}\n")
-print(f"  {combined_file}: {len(test)} scores (backup, all LPs)")
+    print(f"    {lp_name}: {len(lp_scores)} scores, "
+          f"mean={lp_scores.mean():.4f}, std={lp_scores.std():.4f}")
 
 # Save full test predictions for debugging
 test.to_parquet(os.path.join(args.output_dir, "test_final_predictions.parquet"), index=False)
@@ -348,24 +344,21 @@ with open(os.path.join(args.output_dir, "metadata.json"), "w") as f:
     json.dump(metadata, f, indent=2)
 
 # ---------------------------------------------------------------------------
-# 7. Also produce per-signal per-LP files as backup submissions
+# 7. Also produce per-signal backup submissions (single file, all LPs)
 # ---------------------------------------------------------------------------
 print("\n--- Backup: per-signal submission files ---")
 for col in test_signals:
-    for lp_name, tgt_lang in [("ende", "de"), ("enzh", "zh")]:
-        lp_mask = test["tgt_lang"] == tgt_lang
-        lp_scores = test.loc[lp_mask, col].values
-        backup_file = os.path.join(args.output_dir, f"backup_{col.replace('_score', '')}_{lp_name}.txt")
-        with open(backup_file, "w") as f:
-            for score in lp_scores:
-                f.write(f"{score:.6f}\n")
-    print(f"  {col}: written for both LPs")
+    backup_file = os.path.join(args.output_dir, f"iwslt26test_{col.replace('_score', '')}.jsonl")
+    with open(backup_file, "w") as f:
+        for score in test[col].values:
+            f.write(f"{score}\n")
+    print(f"  {backup_file}: {len(test)} scores")
 
 print("\n" + "=" * 80)
 print("SUBMISSION COMPLETE")
 print("=" * 80)
-print("\nFILES TO SUBMIT:")
-print(f"  submission/scores_ende.txt  ({int((test['tgt_lang'] == 'de').sum())} scores)")
-print(f"  submission/scores_enzh.txt  ({int((test['tgt_lang'] == 'zh').sum())} scores)")
-print("\nThese files contain one score per line in the same order as the")
-print("HF test dataset rows for each language pair.")
+print("\nFILE TO SUBMIT:")
+print(f"  {submission_file}")
+print(f"  ({len(test)} scores — all language pairs in original dataset order)")
+print("\nFormat: one bare number per line (json.loads parseable).")
+print("The evaluation script splits by LP internally.")

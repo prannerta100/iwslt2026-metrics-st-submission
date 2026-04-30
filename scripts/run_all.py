@@ -294,19 +294,18 @@ if args.phase <= 7:
     print("\n" + "=" * 70)
     print("  PHASE 7: GENERATE FINAL SUBMISSION FILES")
     print("  Trains LightGBM on scored train, predicts on scored test,")
-    print("  outputs one score file per language pair.")
+    print("  outputs ONE submission file (all LPs, original row order).")
     print("=" * 70)
 
     run_step(
-        "Train LightGBM on train, predict on test, generate per-LP submission",
+        "Train LightGBM on train, predict on test, generate submission",
         "poetry run python scripts/15_final_submission.py",
         critical=True,
     )
 
-    # Verify submission files exist
-    for lp in ["ende", "enzh"]:
-        require_file(f"submission/scores_{lp}.txt",
-                     f"15_final_submission.py should have created submission/scores_{lp}.txt")
+    # Verify submission file exists
+    require_file("submission/iwslt26test_lgbm_ensemble.jsonl",
+                 "15_final_submission.py should have created this")
 
 
 # =========================================================================
@@ -337,7 +336,7 @@ if os.path.isdir("outputs"):
 if os.path.isdir("submission"):
     print("\nSUBMISSION FILES (send these to organizers):")
     for f in sorted(os.listdir("submission")):
-        if f.endswith(".txt"):
+        if f.endswith(".jsonl"):
             size = os.path.getsize(os.path.join("submission", f))
             n_lines = sum(1 for _ in open(os.path.join("submission", f)))
             print(f"  submission/{f:35s} {n_lines:>6} scores, {size/1024:>6.1f} KB")
@@ -353,5 +352,6 @@ if os.path.exists(report_file):
         print(f"  {m['name']:<35} tau={m['tau_per_source']:.4f}")
 
 print("\nTo submit:")
-print("  1. submission/scores_ende.txt  ->  en-de language pair")
-print("  2. submission/scores_enzh.txt  ->  en-zh language pair")
+print("  submission/iwslt26test_lgbm_ensemble.jsonl")
+print("  (ONE file, all LPs in original dataset row order)")
+print("  Format: one bare number per line, json.loads() parseable")
