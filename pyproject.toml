@@ -42,6 +42,7 @@ matplotlib = "*"
 seaborn = "*"
 scikit-learn = "*"
 tqdm = "*"
+hf-transfer = "^0.1.9"
 
 [tool.poetry.group.dev.dependencies]
 ipython = "*"
