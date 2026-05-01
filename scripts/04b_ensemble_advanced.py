@@ -464,7 +464,23 @@ if __name__ == "__main__":
         "cometkiwi22_score", "finetuned_score", "pairwise_score",
         "xcomet_score", "blaser_score", "sonar_cosine", "speechqe_score",
         "metricx_score", "cometkiwi23xxl_score", "cometkiwi23xxl_finetuned_score",
+        "llm_debate_score",
     ]
+
+    # Merge pre-computed LLM debate scores if available
+    llm_dev_cache = "outputs/llm_debate_dev.parquet"
+    if os.path.exists(llm_dev_cache) and "llm_debate_score" not in dev.columns:
+        llm_df = pd.read_parquet(llm_dev_cache)
+        if "llm_debate_score" in llm_df.columns and len(llm_df) == len(dev):
+            dev["llm_debate_score"] = llm_df["llm_debate_score"].values
+            print(f"  Merged llm_debate_score into dev from {llm_dev_cache}")
+    if train is not None:
+        llm_train_cache = "outputs/llm_debate_train.parquet"
+        if os.path.exists(llm_train_cache) and "llm_debate_score" not in train.columns:
+            llm_df = pd.read_parquet(llm_train_cache)
+            if "llm_debate_score" in llm_df.columns and len(llm_df) == len(train):
+                train["llm_debate_score"] = llm_df["llm_debate_score"].values
+                print(f"  Merged llm_debate_score into train from {llm_train_cache}")
 
     dev_signal_cols = [c for c in ALL_SIGNALS if c in dev.columns]
 

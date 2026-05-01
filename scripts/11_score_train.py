@@ -268,7 +268,17 @@ if not args.skip_cometkiwi23xxl:
         print(f"  CometKiwi-23-XXL failed: {e}")
 
 # ---------------------------------------------------------------------------
-# 7. Save
+# 7. Merge pre-computed LLM debate scores if available
+# ---------------------------------------------------------------------------
+llm_cache = "outputs/llm_debate_train.parquet"
+if os.path.exists(llm_cache) and "llm_debate_score" not in train.columns:
+    llm_df = pd.read_parquet(llm_cache)
+    if "llm_debate_score" in llm_df.columns and len(llm_df) == len(train):
+        train["llm_debate_score"] = llm_df["llm_debate_score"].values
+        print(f"  Merged llm_debate_score from {llm_cache}")
+
+# ---------------------------------------------------------------------------
+# 8. Save
 # ---------------------------------------------------------------------------
 score_cols = [c for c in train.columns if c.endswith("_score") or c in ["metricx_error", "sonar_cosine"]]
 print(f"\nScored columns: {[c for c in score_cols if c != 'score']}")

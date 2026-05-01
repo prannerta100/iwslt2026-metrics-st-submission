@@ -372,6 +372,14 @@ test["final_score"] = ensemble_scores
 # 4. Generate submission files
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 80)
+# Merge pre-computed LLM debate scores if available
+llm_test_cache = "outputs/llm_debate_test.parquet"
+if os.path.exists(llm_test_cache) and "llm_debate_score" not in test.columns:
+    llm_df = pd.read_parquet(llm_test_cache)
+    if "llm_debate_score" in llm_df.columns and len(llm_df) == len(test):
+        test["llm_debate_score"] = llm_df["llm_debate_score"].values
+        print(f"  Merged llm_debate_score from {llm_test_cache}")
+
 print("GENERATING SUBMISSION")
 print("=" * 80)
 

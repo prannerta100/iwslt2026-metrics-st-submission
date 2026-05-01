@@ -32,7 +32,7 @@ import pandas as pd
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--dataset", type=str, default="dev", choices=["dev", "test"],
+parser.add_argument("--dataset", type=str, default="dev", choices=["dev", "test", "train"],
                     help="Which dataset to score")
 parser.add_argument("--max-workers", type=int, default=30,
                     help="Concurrent LLM API calls")
@@ -40,9 +40,39 @@ parser.add_argument("--max-samples", type=int, default=None,
                     help="Limit number of samples (for testing)")
 parser.add_argument("--model", type=str, default="gpt-4.1-mini")
 parser.add_argument("--output-dir", type=str, default="outputs/")
+parser.add_argument("--force", action="store_true",
+                    help="Force re-run even if cached parquet exists")
 args = parser.parse_args()
 
 os.makedirs(args.output_dir, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# 0. Check for cached results — skip expensive LLM calls if already scored
+# ---------------------------------------------------------------------------
+cache_path = os.path.join(args.output_dir, f"llm_debate_{args.dataset}.parquet")
+if os.path.exists(cache_path) and not args.max_samples and not args.force:
+    cached = pd.read_parquet(cache_path)
+    if "llm_debate_score" in cached.columns:
+        print(f"Found cached LLM debate scores at {cache_path} ({len(cached)} rows)")
+        print(f"Score stats: mean={cached['llm_debate_score'].mean():.2f}, "
+              f"std={cached['llm_debate_score'].std():.2f}")
+        print("Skipping LLM inference (use --force to re-run)")
+        # Still evaluate if gold scores available
+        if "score" in cached.columns and args.dataset in ("dev", "train"):
+            from scipy import stats
+            taus = []
+            for doc_id, group in cached.groupby("doc_id"):
+                if len(group) < 2:
+                    continue
+                tau, _ = stats.kendalltau(group["llm_debate_score"].values, group["score"].values)
+                if not np.isnan(tau):
+                    taus.append(tau)
+            per_source_tau = np.mean(taus) if taus else 0.0
+            overall_tau, _ = stats.kendalltau(cached["llm_debate_score"].values, cached["score"].values)
+            print(f"\n--- Cached Evaluation ---")
+            print(f"  Per-source Kendall Tau: {per_source_tau:.4f}")
+            print(f"  Overall Kendall Tau:    {overall_tau:.4f}")
+        sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # 1. Load data
@@ -57,6 +87,13 @@ if args.dataset == "dev":
     else:
         from datasets import load_dataset
         ds = load_dataset("maikezu/iwslt2026-metrics-shared-train-dev", split="dev")
+        df = ds.to_pandas()
+elif args.dataset == "train":
+    if os.path.exists("outputs/train_text.parquet"):
+        df = pd.read_parquet("outputs/train_text.parquet")
+    else:
+        from datasets import load_dataset
+        ds = load_dataset("maikezu/iwslt2026-metrics-shared-train-dev", split="train")
         df = ds.to_pandas()
 elif args.dataset == "test":
     if os.path.exists("submission/test_predictions.parquet"):
@@ -187,7 +224,7 @@ print(f"Score stats: mean={llm_scores.mean():.2f}, std={llm_scores.std():.2f}, "
 # ---------------------------------------------------------------------------
 # 5. Evaluate on dev (if gold scores available)
 # ---------------------------------------------------------------------------
-if "score" in df.columns and args.dataset == "dev":
+if "score" in df.columns and args.dataset in ("dev", "train"):
     from scipy import stats
 
     taus = []
