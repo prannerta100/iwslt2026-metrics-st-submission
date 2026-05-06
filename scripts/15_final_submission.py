@@ -362,9 +362,129 @@ with open(os.path.join(args.output_dir, "metadata.json"), "w") as f:
     json.dump(metadata, f, indent=2)
 
 # ---------------------------------------------------------------------------
-# 7. Also produce per-signal backup submissions (single file, all LPs)
+# 7. Evaluate ALL methods on dev — full results table
 # ---------------------------------------------------------------------------
-print("\n--- Backup: per-signal submission files ---")
+print("\n" + "=" * 80)
+print("DEV SET EVALUATION — ALL METHODS (per-source Kendall Tau-b)")
+print("=" * 80)
+
+method_results = []
+
+# Evaluate LightGBM on dev (only if model was trained in section 4)
+try:
+    if dev is not None and "lgbm_pred" not in dev.columns and 'model' in dir():
+        dev_signals_ok = all(c in dev.columns for c in shared_signals)
+        if dev_signals_ok:
+            dev_feat = build_features(dev, shared_signals)
+            dev["lgbm_pred"] = model.predict(dev_feat.values)
+except Exception as e:
+    print(f"  (Could not evaluate LightGBM on dev: {e})")
+
+if dev is not None and "score" in dev.columns:
+    # Evaluate each signal + lgbm on dev
+    eval_cols = list(test_signals)
+    if "lgbm_pred" in dev.columns:
+        eval_cols.append("lgbm_pred")
+
+    for col in eval_cols:
+        if col not in dev.columns:
+            continue
+        display_name = col if col != "lgbm_pred" else "lgbm_ensemble"
+        taus_all, taus_ende, taus_enzh = [], [], []
+        for doc_id, group in dev.groupby("doc_id"):
+            if len(group) < 2:
+                continue
+            tau, _ = stats.kendalltau(group[col].values, group["score"].values)
+            if np.isnan(tau):
+                continue
+            taus_all.append(tau)
+            tgt = group["tgt_lang"].iloc[0]
+            if tgt == "de":
+                taus_ende.append(tau)
+            elif tgt == "zh":
+                taus_enzh.append(tau)
+
+        avg_tau = np.mean(taus_all) if taus_all else 0.0
+        ende_tau = np.mean(taus_ende) if taus_ende else 0.0
+        enzh_tau = np.mean(taus_enzh) if taus_enzh else 0.0
+        method_results.append({
+            "method": display_name,
+            "col": col,
+            "dev_tau": avg_tau,
+            "dev_ende": ende_tau,
+            "dev_enzh": enzh_tau,
+        })
+
+    # Sort by dev_tau descending
+    method_results.sort(key=lambda x: x["dev_tau"], reverse=True)
+
+    # Print table
+    print(f"\n{'Method':<35} {'Dev Tau':>9} {'en-de':>9} {'en-zh':>9}")
+    print("-" * 65)
+    for i, r in enumerate(method_results):
+        marker = " <-- 1st" if i == 0 else (" <-- 2nd" if i == 1 else "")
+        print(f"  {r['method']:<33} {r['dev_tau']:>9.4f} {r['dev_ende']:>9.4f} {r['dev_enzh']:>9.4f}{marker}")
+    print("-" * 65)
+else:
+    print("  WARNING: No dev data with gold scores — cannot evaluate methods")
+
+# ---------------------------------------------------------------------------
+# 8. Select best and second-best based on dev evaluation
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 80)
+print("GENERATING SUBMISSION FILES (best + second-best)")
+print("=" * 80)
+
+# Best is always the LightGBM ensemble (already written above as submission_file)
+print(f"\n  1st SUBMISSION: {submission_file}")
+print(f"       Method: lgbm_ensemble")
+if method_results:
+    best = method_results[0]
+    print(f"       Dev Tau: {best['dev_tau']:.4f} (en-de: {best['dev_ende']:.4f}, en-zh: {best['dev_enzh']:.4f})")
+
+# Second-best: pick the best method from dev that is NOT the lgbm ensemble
+second_best_col = None
+second_result = None
+if method_results and len(method_results) >= 2:
+    for r in method_results:
+        if r["method"] == "lgbm_ensemble":
+            continue
+        # This is the second-best — use its column to write test scores
+        second_best_col = r["col"]
+        second_result = r
+        break
+
+if second_best_col and second_best_col in test.columns:
+    second_file = os.path.join(args.output_dir, f"iwslt26test_{second_best_col.replace('_score', '')}_2nd.jsonl")
+    with open(second_file, "w") as f:
+        for score in test[second_best_col].values:
+            f.write(f"{score}\n")
+    print(f"\n  2nd SUBMISSION: {second_file}")
+    print(f"       Method: {second_best_col}")
+    print(f"       Dev Tau: {second_result['dev_tau']:.4f} (en-de: {second_result['dev_ende']:.4f}, en-zh: {second_result['dev_enzh']:.4f})")
+elif not method_results:
+    # No dev eval available — fall back to priority list
+    FALLBACK_PRIORITY = [
+        "llm_debate_score", "pairwise_score", "finetuned_score",
+        "cometkiwi23xxl_finetuned_score", "cometkiwi23xxl_score",
+        "cometkiwi22_score",
+    ]
+    for col in FALLBACK_PRIORITY:
+        if col in test.columns:
+            second_best_col = col
+            break
+    if second_best_col:
+        second_file = os.path.join(args.output_dir, f"iwslt26test_{second_best_col.replace('_score', '')}_2nd.jsonl")
+        with open(second_file, "w") as f:
+            for score in test[second_best_col].values:
+                f.write(f"{score}\n")
+        print(f"\n  2nd SUBMISSION: {second_file}")
+        print(f"       Method: {second_best_col} (fallback — no dev eval available)")
+
+# ---------------------------------------------------------------------------
+# 9. Also produce per-signal backup submissions (single file, all LPs)
+# ---------------------------------------------------------------------------
+print("\n--- All per-signal backup submissions ---")
 for col in test_signals:
     backup_file = os.path.join(args.output_dir, f"iwslt26test_{col.replace('_score', '')}.jsonl")
     with open(backup_file, "w") as f:
@@ -373,39 +493,28 @@ for col in test_signals:
     print(f"  {backup_file}: {len(test)} scores")
 
 # ---------------------------------------------------------------------------
-# 8. Second-best submission (best single signal or LLM debate)
+# 10. Save results table as JSON
 # ---------------------------------------------------------------------------
-print("\n--- Generating second-best submission ---")
-# Rank individual signals on dev if available, otherwise use LLM debate > pairwise > finetuned
-SECOND_BEST_PRIORITY = [
-    "llm_debate_score", "pairwise_score", "finetuned_score",
-    "cometkiwi23xxl_finetuned_score", "cometkiwi23xxl_score",
-    "cometkiwi22_score", "xcomet_score", "metricx_score", "blaser_score",
-]
-second_best_col = None
-for col in SECOND_BEST_PRIORITY:
-    if col in test.columns:
-        second_best_col = col
-        break
-
-if second_best_col:
-    second_file = os.path.join(args.output_dir, f"iwslt26test_{second_best_col.replace('_score', '')}_2nd.jsonl")
-    with open(second_file, "w") as f:
-        for score in test[second_best_col].values:
-            f.write(f"{score}\n")
-    print(f"  SECOND BEST: {second_file}")
-    print(f"  Method: {second_best_col} ({len(test)} scores)")
-else:
-    print("  No second-best signal available")
+results_json = {
+    "dev_evaluation": method_results,
+    "1st_submission": {
+        "file": submission_file,
+        "method": "lgbm_ensemble",
+        "dev_tau": method_results[0]["dev_tau"] if method_results else None,
+        "dev_ende": method_results[0]["dev_ende"] if method_results else None,
+        "dev_enzh": method_results[0]["dev_enzh"] if method_results else None,
+    },
+    "2nd_submission": {
+        "file": second_file if second_best_col else None,
+        "method": second_best_col,
+        "dev_tau": second_result["dev_tau"] if second_result else None,
+        "dev_ende": second_result["dev_ende"] if second_result else None,
+        "dev_enzh": second_result["dev_enzh"] if second_result else None,
+    } if second_best_col else None,
+}
+with open(os.path.join(args.output_dir, "submission_results.json"), "w") as f:
+    json.dump(results_json, f, indent=2)
 
 print("\n" + "=" * 80)
-print("SUBMISSION COMPLETE")
+print("DONE — submission_results.json saved with full evaluation table")
 print("=" * 80)
-print("\nFILES TO SUBMIT:")
-print(f"  1st: {submission_file}")
-print(f"       Method: LightGBM ensemble ({len(test)} scores)")
-if second_best_col:
-    print(f"  2nd: {second_file}")
-    print(f"       Method: {second_best_col} ({len(test)} scores)")
-print("\nFormat: one bare number per line (json.loads parseable).")
-print("The evaluation script splits by LP internally.")
