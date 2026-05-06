@@ -381,8 +381,8 @@ except Exception as e:
     print(f"  (Could not evaluate LightGBM on dev: {e})")
 
 if dev is not None and "score" in dev.columns:
-    # Evaluate each signal + lgbm on dev
-    eval_cols = list(test_signals)
+    # Evaluate ALL score columns present in dev (not just test signals)
+    eval_cols = [c for c in dev.columns if c.endswith("_score") and c != "score"]
     if "lgbm_pred" in dev.columns:
         eval_cols.append("lgbm_pred")
 
@@ -419,12 +419,23 @@ if dev is not None and "score" in dev.columns:
     method_results.sort(key=lambda x: x["dev_tau"], reverse=True)
 
     # Print table
-    print(f"\n{'Method':<35} {'Dev Tau':>9} {'en-de':>9} {'en-zh':>9}")
-    print("-" * 65)
+    print(f"\n{'Method':<35} {'Dev Tau':>9} {'en-de':>9} {'en-zh':>9}  {'Status'}")
+    print("-" * 80)
+    best_idx = 0
+    second_idx = None
     for i, r in enumerate(method_results):
-        marker = " <-- 1st" if i == 0 else (" <-- 2nd" if i == 1 else "")
-        print(f"  {r['method']:<33} {r['dev_tau']:>9.4f} {r['dev_ende']:>9.4f} {r['dev_enzh']:>9.4f}{marker}")
-    print("-" * 65)
+        in_test = r["col"] in test.columns or r["method"] == "lgbm_ensemble"
+        status = "[in test]" if in_test else "[dev-only]"
+        marker = ""
+        if i == 0:
+            marker = " <-- 1st"
+        elif second_idx is None and i > 0:
+            # Second-best must be submittable (in test) and not the same as lgbm
+            if in_test and r["method"] != "lgbm_ensemble":
+                second_idx = i
+                marker = " <-- 2nd"
+        print(f"  {r['method']:<33} {r['dev_tau']:>9.4f} {r['dev_ende']:>9.4f} {r['dev_enzh']:>9.4f}  {status}{marker}")
+    print("-" * 80)
 else:
     print("  WARNING: No dev data with gold scores — cannot evaluate methods")
 
@@ -442,14 +453,15 @@ if method_results:
     best = method_results[0]
     print(f"       Dev Tau: {best['dev_tau']:.4f} (en-de: {best['dev_ende']:.4f}, en-zh: {best['dev_enzh']:.4f})")
 
-# Second-best: pick the best method from dev that is NOT the lgbm ensemble
+# Second-best: pick the best method from dev that is submittable (in test) and not lgbm
 second_best_col = None
 second_result = None
 if method_results and len(method_results) >= 2:
     for r in method_results:
         if r["method"] == "lgbm_ensemble":
             continue
-        # This is the second-best — use its column to write test scores
+        if r["col"] not in test.columns:
+            continue
         second_best_col = r["col"]
         second_result = r
         break
