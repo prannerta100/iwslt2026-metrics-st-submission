@@ -372,11 +372,40 @@ for col in test_signals:
             f.write(f"{score}\n")
     print(f"  {backup_file}: {len(test)} scores")
 
+# ---------------------------------------------------------------------------
+# 8. Second-best submission (best single signal or LLM debate)
+# ---------------------------------------------------------------------------
+print("\n--- Generating second-best submission ---")
+# Rank individual signals on dev if available, otherwise use LLM debate > pairwise > finetuned
+SECOND_BEST_PRIORITY = [
+    "llm_debate_score", "pairwise_score", "finetuned_score",
+    "cometkiwi23xxl_finetuned_score", "cometkiwi23xxl_score",
+    "cometkiwi22_score", "xcomet_score", "metricx_score", "blaser_score",
+]
+second_best_col = None
+for col in SECOND_BEST_PRIORITY:
+    if col in test.columns:
+        second_best_col = col
+        break
+
+if second_best_col:
+    second_file = os.path.join(args.output_dir, f"iwslt26test_{second_best_col.replace('_score', '')}_2nd.jsonl")
+    with open(second_file, "w") as f:
+        for score in test[second_best_col].values:
+            f.write(f"{score}\n")
+    print(f"  SECOND BEST: {second_file}")
+    print(f"  Method: {second_best_col} ({len(test)} scores)")
+else:
+    print("  No second-best signal available")
+
 print("\n" + "=" * 80)
 print("SUBMISSION COMPLETE")
 print("=" * 80)
-print("\nFILE TO SUBMIT:")
-print(f"  {submission_file}")
-print(f"  ({len(test)} scores — all language pairs in original dataset order)")
+print("\nFILES TO SUBMIT:")
+print(f"  1st: {submission_file}")
+print(f"       Method: LightGBM ensemble ({len(test)} scores)")
+if second_best_col:
+    print(f"  2nd: {second_file}")
+    print(f"       Method: {second_best_col} ({len(test)} scores)")
 print("\nFormat: one bare number per line (json.loads parseable).")
 print("The evaluation script splits by LP internally.")
