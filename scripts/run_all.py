@@ -269,19 +269,19 @@ if args.phase <= 6:
         skip_flags.append("--skip-cometkiwi23xxl")
     skip_str = " ".join(skip_flags)
 
-    run_step(
-        "Score test set (48K samples) with all available metrics",
-        f"PYTHONPATH=/tmp/metricx:$PYTHONPATH poetry run python scripts/13_submit_test.py --batch-size {args.batch_size} {skip_str}",
-        critical=True,
-    )
-
-    # LLM-as-Judge on test (if token available)
+    # LLM-as-Judge on test FIRST (so 13_submit_test.py can merge the cached parquet)
     if os.environ.get("WEBEX_TOKEN"):
         run_step(
             "LLM-as-Judge debate baseline (test, 48K samples)",
             "poetry run python scripts/16_llm_baseline.py --dataset test --max-workers 50",
             critical=False,
         )
+
+    run_step(
+        "Score test set (48K samples) with all available metrics",
+        f"PYTHONPATH=/tmp/metricx:$PYTHONPATH poetry run python scripts/13_submit_test.py --batch-size {args.batch_size} {skip_str}",
+        critical=True,
+    )
 
     require_file("submission/test_predictions.parquet",
                  "13_submit_test.py should have created this")

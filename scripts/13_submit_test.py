@@ -1,11 +1,19 @@
 """
-Generate final submission for IWSLT 2026 Metrics Shared Task (test set).
+Score test set with ALL available metrics for IWSLT 2026 Metrics Shared Task.
 
-Loads maikezu/iwslt2026-metrics-shared-test, scores with all available metrics,
-applies ensemble weights optimized on dev, and outputs submission scores.
+Loads maikezu/iwslt2026-metrics-shared-test, scores with every model:
+  1. CometKiwi-22 (pretrained baseline)
+  2. CometKiwi-22 fine-tuned MSE (models/cometkiwi_finetuned/*.ckpt)
+  3. CometKiwi-22 fine-tuned pairwise (models/cometkiwi_pairwise/*.ckpt)
+  4. CometKiwi-23-XXL (pretrained)
+  5. CometKiwi-23-XXL fine-tuned pairwise (models/cometkiwi23xxl_pairwise/*.ckpt)
+  6. xCOMET-XL (pretrained)
+  7. MetricX-24-Hybrid-XXL
+  8. BLASER-2 QE
+  9. LLM debate scores (from cached parquet)
 
-Test set: 48,044 rows (en→de: 24,016, en→zh: 24,028), 58 docs, 8 systems.
-No gold scores (blind evaluation).
+Outputs: submission/test_predictions.parquet with ALL score columns.
+Then 15_final_submission.py trains LightGBM on these and picks best/2nd-best.
 
 Run on GPU VM:
   poetry run python scripts/13_submit_test.py
@@ -15,6 +23,7 @@ Run on GPU VM:
 import os
 import sys
 import json
+import glob
 import time
 import argparse
 
@@ -42,8 +51,6 @@ parser.add_argument("--skip-blaser", action="store_true")
 parser.add_argument("--skip-metricx", action="store_true")
 parser.add_argument("--skip-cometkiwi23xxl", action="store_true")
 parser.add_argument("--skip-finetuned", action="store_true")
-parser.add_argument("--weights-file", type=str, default=None,
-                    help="JSON file with ensemble weights (from 04b). If not provided, uses dev-optimized defaults.")
 args = parser.parse_args()
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -52,19 +59,17 @@ os.makedirs(args.output_dir, exist_ok=True)
 # 1. Load test data
 # ---------------------------------------------------------------------------
 print("=" * 80)
-print("IWSLT 2026 METRICS SHARED TASK — TEST SET SUBMISSION")
+print("IWSLT 2026 METRICS SHARED TASK — TEST SET SCORING")
 print("=" * 80)
 
 from datasets import load_dataset
 ds = load_dataset("maikezu/iwslt2026-metrics-shared-test")
-# Remove audio column to avoid torchcodec decoding issues
 if "audio" in ds["test"].column_names:
     ds["test"] = ds["test"].remove_columns(["audio"])
 test = ds["test"].to_pandas()
 
 print(f"Test set: {len(test)} rows")
 print(f"Language pairs: {test.groupby(['src_lang', 'tgt_lang']).size().to_dict()}")
-print(f"Domains: {test.groupby('domain').size().to_dict()}")
 print(f"Docs: {test['doc_id'].nunique()}, Systems: {test['tgt_system'].nunique()}")
 
 assert "src_text" in test.columns, "Missing src_text"
@@ -84,13 +89,22 @@ comet_samples = [
     for _, row in test.iterrows()
 ]
 
-# ---------------------------------------------------------------------------
-# 2. Score with all available metrics
-# ---------------------------------------------------------------------------
+scored = []
 
-# --- CometKiwi-22 ---
+
+def report_score(name, scores):
+    scored.append(name)
+    print(f"  Score range: [{min(scores):.4f}, {max(scores):.4f}], "
+          f"mean={np.mean(scores):.4f}")
+
+
+# ---------------------------------------------------------------------------
+# 2. CometKiwi-22 (pretrained baseline)
+# ---------------------------------------------------------------------------
 if not args.skip_cometkiwi22:
-    print(f"\n--- CometKiwi-22 ({len(test)} samples) ---")
+    print(f"\n{'─'*70}")
+    print(f"  CometKiwi-22 (pretrained) — {len(test)} samples")
+    print(f"{'─'*70}")
     from comet import download_model, load_from_checkpoint
 
     local_ckpt = "/tmp/cometkiwi22/checkpoints/model.ckpt"
@@ -100,17 +114,98 @@ if not args.skip_cometkiwi22:
     start = time.time()
     output = model.predict(comet_samples, batch_size=args.batch_size, gpus=gpus, num_workers=4 if gpus else 2)
     test["cometkiwi22_score"] = output["scores"]
-    elapsed = time.time() - start
-    print(f"  Done in {elapsed:.1f}s ({len(test)/elapsed:.1f} samples/s)")
-    print(f"  Score range: [{min(output['scores']):.4f}, {max(output['scores']):.4f}]")
+    print(f"  Done in {time.time()-start:.1f}s")
+    report_score("cometkiwi22_score", output["scores"])
     del model
     if gpus:
         torch.cuda.empty_cache()
 
-# --- xCOMET-XL ---
+# ---------------------------------------------------------------------------
+# 3. CometKiwi-22 fine-tuned MSE (from 03_finetune_cometkiwi.py)
+#    Checkpoint: models/cometkiwi_finetuned/best-*.ckpt (Lightning format)
+# ---------------------------------------------------------------------------
+if not args.skip_finetuned:
+    ckpt_dir = "models/cometkiwi_finetuned/"
+    ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "*.ckpt"))) if os.path.isdir(ckpt_dir) else []
+    if ckpts:
+        ckpt_path = ckpts[-1]
+        print(f"\n{'─'*70}")
+        print(f"  CometKiwi-22 fine-tuned MSE — {ckpt_path}")
+        print(f"{'─'*70}")
+        try:
+            from comet import download_model, load_from_checkpoint
+
+            local_ckpt = "/tmp/cometkiwi22/checkpoints/model.ckpt"
+            model_path = local_ckpt if os.path.exists(local_ckpt) else download_model("Unbabel/wmt22-cometkiwi-da")
+            model = load_from_checkpoint(model_path)
+
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            if "state_dict" in checkpoint:
+                model.load_state_dict(checkpoint["state_dict"])
+            else:
+                model.load_state_dict(checkpoint)
+
+            start = time.time()
+            output = model.predict(comet_samples, batch_size=args.batch_size, gpus=gpus, num_workers=4 if gpus else 2)
+            ft_scores = output.scores if hasattr(output, "scores") else output["scores"]
+            test["finetuned_score"] = ft_scores
+            print(f"  Done in {time.time()-start:.1f}s")
+            report_score("finetuned_score", ft_scores)
+            del model
+            if gpus:
+                torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"  FAILED: {e}")
+    else:
+        print(f"\n  [SKIP] No fine-tuned MSE checkpoint in {ckpt_dir}")
+
+# ---------------------------------------------------------------------------
+# 4. CometKiwi-22 fine-tuned PAIRWISE (from 03b_finetune_pairwise.py)
+#    Checkpoint: models/cometkiwi_pairwise/best-*.ckpt (raw state_dict)
+# ---------------------------------------------------------------------------
+if not args.skip_finetuned:
+    ckpt_dir = "models/cometkiwi_pairwise/"
+    ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "*.ckpt"))) if os.path.isdir(ckpt_dir) else []
+    if ckpts:
+        ckpt_path = ckpts[-1]
+        print(f"\n{'─'*70}")
+        print(f"  CometKiwi-22 fine-tuned PAIRWISE — {ckpt_path}")
+        print(f"{'─'*70}")
+        try:
+            from comet import download_model, load_from_checkpoint
+
+            local_ckpt = "/tmp/cometkiwi22/checkpoints/model.ckpt"
+            model_path = local_ckpt if os.path.exists(local_ckpt) else download_model("Unbabel/wmt22-cometkiwi-da")
+            model = load_from_checkpoint(model_path)
+
+            state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            if "state_dict" in state_dict:
+                model.load_state_dict(state_dict["state_dict"])
+            else:
+                model.load_state_dict(state_dict)
+
+            start = time.time()
+            output = model.predict(comet_samples, batch_size=args.batch_size, gpus=gpus, num_workers=4 if gpus else 2)
+            pw_scores = output.scores if hasattr(output, "scores") else output["scores"]
+            test["pairwise_score"] = pw_scores
+            print(f"  Done in {time.time()-start:.1f}s")
+            report_score("pairwise_score", pw_scores)
+            del model
+            if gpus:
+                torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"  FAILED: {e}")
+    else:
+        print(f"\n  [SKIP] No pairwise checkpoint in {ckpt_dir}")
+
+# ---------------------------------------------------------------------------
+# 5. xCOMET-XL (pretrained)
+# ---------------------------------------------------------------------------
 if not args.skip_xcomet:
+    print(f"\n{'─'*70}")
+    print(f"  xCOMET-XL — {len(test)} samples")
+    print(f"{'─'*70}")
     try:
-        print(f"\n--- xCOMET-XL ({len(test)} samples) ---")
         from comet import download_model, load_from_checkpoint
 
         model_path = download_model("Unbabel/XCOMET-XL")
@@ -119,19 +214,22 @@ if not args.skip_xcomet:
         start = time.time()
         output = model.predict(comet_samples, batch_size=args.batch_size, gpus=gpus, num_workers=4 if gpus else 2)
         test["xcomet_score"] = output["scores"]
-        elapsed = time.time() - start
-        print(f"  Done in {elapsed:.1f}s ({len(test)/elapsed:.1f} samples/s)")
-        print(f"  Score range: [{min(output['scores']):.4f}, {max(output['scores']):.4f}]")
+        print(f"  Done in {time.time()-start:.1f}s")
+        report_score("xcomet_score", output["scores"])
         del model
         if gpus:
             torch.cuda.empty_cache()
     except Exception as e:
-        print(f"  xCOMET-XL not available: {e}")
+        print(f"  FAILED: {e}")
 
-# --- CometKiwi-23-XXL ---
+# ---------------------------------------------------------------------------
+# 6. CometKiwi-23-XXL (pretrained)
+# ---------------------------------------------------------------------------
 if not args.skip_cometkiwi23xxl:
+    print(f"\n{'─'*70}")
+    print(f"  CometKiwi-23-XXL (pretrained) — {len(test)} samples")
+    print(f"{'─'*70}")
     try:
-        print(f"\n--- CometKiwi-23-XXL ({len(test)} samples) ---")
         from comet import download_model, load_from_checkpoint
 
         model_path = download_model("Unbabel/wmt23-cometkiwi-da-xxl")
@@ -141,61 +239,60 @@ if not args.skip_cometkiwi23xxl:
         output = model.predict(comet_samples, batch_size=32, gpus=gpus, num_workers=4 if gpus else 2)
         ck23_scores = output.scores if hasattr(output, "scores") else output["scores"]
         test["cometkiwi23xxl_score"] = ck23_scores
-        elapsed = time.time() - start
-        print(f"  Done in {elapsed:.1f}s ({len(test)/elapsed:.1f} samples/s)")
-        print(f"  Score range: [{min(ck23_scores):.4f}, {max(ck23_scores):.4f}]")
+        print(f"  Done in {time.time()-start:.1f}s")
+        report_score("cometkiwi23xxl_score", ck23_scores)
         del model
         if gpus:
             torch.cuda.empty_cache()
     except Exception as e:
-        print(f"  CometKiwi-23-XXL not available: {e}")
+        print(f"  FAILED: {e}")
 
-# --- Fine-tuned CometKiwi (pairwise) ---
-if not args.skip_finetuned:
-    finetuned_ckpt = None
-    for ckpt_dir in ["models/cometkiwi_finetuned/", "models/cometkiwi23xxl_pairwise/"]:
-        if os.path.exists(ckpt_dir):
-            import glob
-            ckpts = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
-            if ckpts:
-                finetuned_ckpt = sorted(ckpts)[-1]
-                break
-
-    if finetuned_ckpt:
+# ---------------------------------------------------------------------------
+# 7. CometKiwi-23-XXL fine-tuned PAIRWISE (from 12_finetune_cometkiwi23xxl.py)
+#    Checkpoint: models/cometkiwi23xxl_pairwise/best-*.ckpt (raw state_dict)
+# ---------------------------------------------------------------------------
+if not args.skip_cometkiwi23xxl and not args.skip_finetuned:
+    ckpt_dir = "models/cometkiwi23xxl_pairwise/"
+    ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "*.ckpt"))) if os.path.isdir(ckpt_dir) else []
+    if ckpts:
+        ckpt_path = ckpts[-1]
+        print(f"\n{'─'*70}")
+        print(f"  CometKiwi-23-XXL fine-tuned PAIRWISE — {ckpt_path}")
+        print(f"{'─'*70}")
         try:
-            print(f"\n--- Fine-tuned CometKiwi ({finetuned_ckpt}) ---")
             from comet import download_model, load_from_checkpoint
 
-            # Determine base model
-            if "23xxl" in finetuned_ckpt:
-                base_model = "Unbabel/wmt23-cometkiwi-da-xxl"
-                batch_sz = 32
-            else:
-                base_model = "Unbabel/wmt22-cometkiwi-da"
-                batch_sz = args.batch_size
-
-            model_path = download_model(base_model)
+            model_path = download_model("Unbabel/wmt23-cometkiwi-da-xxl")
             model = load_from_checkpoint(model_path)
-            state_dict = torch.load(finetuned_ckpt, map_location="cpu", weights_only=False)
-            model.load_state_dict(state_dict)
+
+            state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            if "state_dict" in state_dict:
+                model.load_state_dict(state_dict["state_dict"])
+            else:
+                model.load_state_dict(state_dict)
 
             start = time.time()
-            output = model.predict(comet_samples, batch_size=batch_sz, gpus=gpus, num_workers=4 if gpus else 2)
-            ft_scores = output.scores if hasattr(output, "scores") else output["scores"]
-            test["finetuned_score"] = ft_scores
-            elapsed = time.time() - start
-            print(f"  Done in {elapsed:.1f}s ({len(test)/elapsed:.1f} samples/s)")
-            print(f"  Score range: [{min(ft_scores):.4f}, {max(ft_scores):.4f}]")
+            output = model.predict(comet_samples, batch_size=16, gpus=gpus, num_workers=4 if gpus else 2)
+            xxl_ft_scores = output.scores if hasattr(output, "scores") else output["scores"]
+            test["cometkiwi23xxl_finetuned_score"] = xxl_ft_scores
+            print(f"  Done in {time.time()-start:.1f}s")
+            report_score("cometkiwi23xxl_finetuned_score", xxl_ft_scores)
             del model
             if gpus:
                 torch.cuda.empty_cache()
         except Exception as e:
-            print(f"  Fine-tuned model failed: {e}")
+            print(f"  FAILED: {e}")
+    else:
+        print(f"\n  [SKIP] No CK-23-XXL pairwise checkpoint in {ckpt_dir}")
 
-# --- MetricX-24 ---
+# ---------------------------------------------------------------------------
+# 8. MetricX-24-Hybrid-XXL
+# ---------------------------------------------------------------------------
 if not args.skip_metricx:
+    print(f"\n{'─'*70}")
+    print(f"  MetricX-24-Hybrid-XXL — {len(test)} samples")
+    print(f"{'─'*70}")
     try:
-        print(f"\n--- MetricX-24-Hybrid-XXL ({len(test)} samples) ---")
         from transformers import AutoTokenizer
         from metricx24.models import MT5ForRegression
 
@@ -259,19 +356,22 @@ if not args.skip_metricx:
 
         test["metricx_error"] = metricx_scores
         test["metricx_score"] = 25.0 - np.array(metricx_scores)
-        elapsed = time.time() - start
-        print(f"  Done in {elapsed:.1f}s ({len(test)/elapsed:.1f} samples/s)")
-        print(f"  Score range: [{test['metricx_score'].min():.4f}, {test['metricx_score'].max():.4f}]")
+        print(f"  Done in {time.time()-start:.1f}s")
+        report_score("metricx_score", test["metricx_score"].tolist())
         del metricx_model
         if gpus:
             torch.cuda.empty_cache()
     except Exception as e:
-        print(f"  MetricX-24 not available: {e}")
+        print(f"  FAILED: {e}")
 
-# --- BLASER-2 QE ---
+# ---------------------------------------------------------------------------
+# 9. BLASER-2 QE (text-text)
+# ---------------------------------------------------------------------------
 if not args.skip_blaser:
+    print(f"\n{'─'*70}")
+    print(f"  BLASER-2 QE — {len(test)} samples")
+    print(f"{'─'*70}")
     try:
-        print(f"\n--- BLASER-2 QE ({len(test)} samples) ---")
         from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
         from sonar.models.blaser.loader import load_blaser_model
 
@@ -305,133 +405,49 @@ if not args.skip_blaser:
                     blaser_scores[batch_idx] = scores.cpu().numpy()
 
         test["blaser_score"] = blaser_scores
-        elapsed = time.time() - start
-        print(f"  Done in {elapsed:.1f}s ({len(test)/elapsed:.1f} samples/s)")
-        print(f"  Score range: [{blaser_scores.min():.4f}, {blaser_scores.max():.4f}]")
+        print(f"  Done in {time.time()-start:.1f}s")
+        report_score("blaser_score", blaser_scores.tolist())
         del text_encoder, blaser_qe
         if gpus:
             torch.cuda.empty_cache()
     except Exception as e:
-        print(f"  BLASER-2 not available: {e}")
-
-
-# ---------------------------------------------------------------------------
-# 3. Ensemble
-# ---------------------------------------------------------------------------
-print("\n" + "=" * 80)
-print("ENSEMBLE")
-print("=" * 80)
-
-signal_cols = [c for c in test.columns if c.endswith("_score") and c not in ("score",)]
-print(f"Available signals ({len(signal_cols)}): {signal_cols}")
-
-# Dev-optimized default weights (from pairwise_score dominance on dev)
-# pairwise/finetuned: tau=0.35, cometkiwi22: 0.32, metricx: 0.30, xcomet: 0.29, ck23xxl: 0.30, blaser: 0.27
-DEFAULT_WEIGHTS = {
-    "finetuned_score": 0.30,
-    "pairwise_score": 0.30,
-    "cometkiwi22_score": 0.15,
-    "cometkiwi23xxl_score": 0.10,
-    "metricx_score": 0.08,
-    "xcomet_score": 0.05,
-    "blaser_score": 0.02,
-}
-
-if args.weights_file and os.path.exists(args.weights_file):
-    with open(args.weights_file) as f:
-        loaded_weights = json.load(f)
-    print(f"Loaded weights from {args.weights_file}")
-else:
-    loaded_weights = DEFAULT_WEIGHTS
-    print("Using default dev-optimized weights")
-
-# Filter to only signals we actually have
-active_weights = {k: v for k, v in loaded_weights.items() if k in signal_cols}
-
-if not active_weights:
-    # Fallback: equal weight all available signals
-    active_weights = {c: 1.0 / len(signal_cols) for c in signal_cols}
-    print("WARNING: No matching weights found, using equal weights")
-
-# Normalize weights
-total_w = sum(active_weights.values())
-active_weights = {k: v / total_w for k, v in active_weights.items()}
-
-print(f"\nEnsemble weights:")
-for col, w in sorted(active_weights.items(), key=lambda x: -x[1]):
-    print(f"  {col}: {w:.4f}")
-
-# Compute weighted ensemble
-ensemble_scores = np.zeros(len(test))
-for col, w in active_weights.items():
-    ensemble_scores += test[col].values * w
-
-test["final_score"] = ensemble_scores
+        print(f"  FAILED: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. Generate submission files
+# 10. LLM debate scores (from cached parquet — no re-inference)
 # ---------------------------------------------------------------------------
-print("\n" + "=" * 80)
-# Merge pre-computed LLM debate scores if available
 llm_test_cache = "outputs/llm_debate_test.parquet"
 if os.path.exists(llm_test_cache) and "llm_debate_score" not in test.columns:
     llm_df = pd.read_parquet(llm_test_cache)
     if "llm_debate_score" in llm_df.columns and len(llm_df) == len(test):
         test["llm_debate_score"] = llm_df["llm_debate_score"].values
-        print(f"  Merged llm_debate_score from {llm_test_cache}")
+        print(f"\n  Merged llm_debate_score from {llm_test_cache}")
+        report_score("llm_debate_score", test["llm_debate_score"].tolist())
+    else:
+        print(f"\n  WARNING: {llm_test_cache} exists but row count mismatch "
+              f"({len(llm_df)} vs {len(test)})")
+else:
+    if "llm_debate_score" not in test.columns:
+        print(f"\n  [SKIP] No cached LLM debate scores at {llm_test_cache}")
+        print(f"         Run: WEBEX_TOKEN=... python scripts/16_llm_baseline.py --dataset test")
 
-print("GENERATING SUBMISSION")
-print("=" * 80)
-
-# Primary submission: ensemble scores
-score_file = os.path.join(args.output_dir, "scores.txt")
-with open(score_file, "w") as f:
-    for score in test["final_score"].values:
-        f.write(f"{score:.6f}\n")
-print(f"Saved {len(test)} scores to {score_file}")
-
-# Also save individual signal scores as backup submissions
-for col in signal_cols:
-    backup_file = os.path.join(args.output_dir, f"scores_{col.replace('_score', '')}.txt")
-    with open(backup_file, "w") as f:
-        for score in test[col].values:
-            f.write(f"{score:.6f}\n")
-    print(f"  Backup: {backup_file}")
-
-# Save full predictions for analysis
-test.to_parquet(os.path.join(args.output_dir, "test_predictions.parquet"), index=False)
-
-# Save metadata
-metadata = {
-    "team": "pranav",
-    "system": "ensemble-qe",
-    "task": "iwslt2026-metrics-shared-task",
-    "signals": signal_cols,
-    "weights": active_weights,
-    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    "n_test_samples": len(test),
-    "language_pairs": test.groupby(["src_lang", "tgt_lang"]).size().to_dict(),
-    "score_stats": {
-        "mean": float(test["final_score"].mean()),
-        "std": float(test["final_score"].std()),
-        "min": float(test["final_score"].min()),
-        "max": float(test["final_score"].max()),
-    },
-}
-# Fix tuple keys for JSON serialization
-metadata["language_pairs"] = {f"{k[0]}-{k[1]}": v for k, v in metadata["language_pairs"].items()}
-
-with open(os.path.join(args.output_dir, "metadata.json"), "w") as f:
-    json.dump(metadata, f, indent=2)
-
-print(f"\nScore stats: mean={test['final_score'].mean():.4f}, std={test['final_score'].std():.4f}")
-print(f"  min={test['final_score'].min():.4f}, max={test['final_score'].max():.4f}")
-
-# Per-LP stats
-for (src, tgt), group in test.groupby(["src_lang", "tgt_lang"]):
-    print(f"  {src}->{tgt}: mean={group['final_score'].mean():.4f}, std={group['final_score'].std():.4f}")
-
-print(f"\nAll files saved to {args.output_dir}/")
+# ---------------------------------------------------------------------------
+# 11. Summary & Save
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 80)
-print("SUBMISSION COMPLETE")
+print("SCORING COMPLETE")
 print("=" * 80)
+
+signal_cols = [c for c in test.columns if c.endswith("_score") and c != "score"]
+print(f"\nScored signals ({len(signal_cols)}): {signal_cols}")
+
+for col in signal_cols:
+    vals = test[col].values
+    print(f"  {col:<35} mean={vals.mean():.4f}  std={vals.std():.4f}  "
+          f"[{vals.min():.4f}, {vals.max():.4f}]")
+
+# Save full predictions parquet (15_final_submission.py reads this)
+output_file = os.path.join(args.output_dir, "test_predictions.parquet")
+test.to_parquet(output_file, index=False)
+print(f"\nSaved {len(test)} rows x {len(signal_cols)} signals to {output_file}")
+print(f"\nNext step: poetry run python scripts/15_final_submission.py")

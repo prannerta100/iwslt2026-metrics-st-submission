@@ -282,16 +282,17 @@ if train is not None and len(shared_signals) >= 1:
 # ---------------------------------------------------------------------------
 if test_preds is None:
     print("\n--- Weighted Average Fallback ---")
-    # Weights from dev performance (tau values)
+    # Weights from dev performance (tau values, highest = most weight)
     DEFAULT_WEIGHTS = {
-        "finetuned_score": 0.30,
-        "pairwise_score": 0.30,
-        "cometkiwi22_score": 0.15,
-        "cometkiwi23xxl_score": 0.10,
-        "cometkiwi23xxl_finetuned_score": 0.05,
-        "metricx_score": 0.05,
-        "xcomet_score": 0.03,
-        "blaser_score": 0.02,
+        "pairwise_score": 0.20,
+        "finetuned_score": 0.20,
+        "llm_debate_score": 0.15,
+        "cometkiwi23xxl_finetuned_score": 0.12,
+        "cometkiwi22_score": 0.10,
+        "cometkiwi23xxl_score": 0.08,
+        "metricx_score": 0.06,
+        "xcomet_score": 0.05,
+        "blaser_score": 0.04,
     }
 
     active_weights = {k: v for k, v in DEFAULT_WEIGHTS.items() if k in test_signals}
