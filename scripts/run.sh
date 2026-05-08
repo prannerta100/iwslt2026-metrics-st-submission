@@ -1,44 +1,31 @@
 #!/bin/bash
-# IWSLT 2026 Metrics Shared Task — Full Pipeline
-# Run on GPU VM: bash scripts/run.sh
+# IWSLT 2026 Metrics — Full Pipeline (CometKiwi-22 pairwise)
 set -e
 
 echo "============================================================"
-echo "  IWSLT 2026 METRICS — FULL PIPELINE"
+echo "  IWSLT 2026 METRICS — CometKiwi-22 Pairwise Pipeline"
 echo "  $(date)"
 echo "============================================================"
 
-# SSL fix for pyenv
-if [ -f env.sh ]; then
-    source env.sh
-fi
+if [ -f env.sh ]; then source env.sh; fi
 
-# Phase 1: Download data
 echo ""
-echo ">>> PHASE 1: Download data from HuggingFace"
+echo ">>> PHASE 1: Download data"
 poetry run python scripts/01_download_data.py
 
-# Phase 2: Fine-tune CK-23-XXL with pairwise ranking loss
 echo ""
-echo ">>> PHASE 2: Fine-tune CometKiwi-23-XXL (pairwise ranking)"
-poetry run python scripts/02_finetune_pairwise.py \
-    --epochs 5 \
-    --batch-size 8 \
-    --grad-accum 4 \
-    --patience 2
+echo ">>> PHASE 2: Fine-tune CometKiwi-22 (pairwise ranking, ~30 min)"
+poetry run python scripts/02_finetune_pairwise.py --epochs 10 --batch-size 32 --patience 3
 
-# Phase 3: Score test + dev with fine-tuned and pretrained models
 echo ""
-echo ">>> PHASE 3: Score test set"
-poetry run python scripts/03_score_test.py --batch-size 32
+echo ">>> PHASE 3: Score test + dev"
+poetry run python scripts/03_score_test.py --batch-size 128
 
-# Phase 4: Generate submission files
 echo ""
 echo ">>> PHASE 4: Generate submission files"
 poetry run python scripts/04_generate_submission.py
 
 echo ""
 echo "============================================================"
-echo "  PIPELINE COMPLETE"
-echo "  Submission files: submission/primary_*.txt"
+echo "  DONE. Submit: submission/primary_ende.txt + primary_enzh.txt"
 echo "============================================================"

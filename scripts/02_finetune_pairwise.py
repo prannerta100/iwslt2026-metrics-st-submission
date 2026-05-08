@@ -1,18 +1,16 @@
 """
-Fine-tune CometKiwi-23-XXL (10.7B) with pairwise ranking loss.
+Fine-tune CometKiwi-22 (580M) with pairwise ranking loss.
 
-Directly optimizes Kendall tau by training on (better, worse) pairs from within
-the same document. Uses bf16, gradient checkpointing, and differential LR.
+This is the approach that previously achieved 35.12% segment-level Kendall tau,
+beating the organizers' COMET baseline of 34.6%.
 
-Memory budget (96-102GB VRAM):
-  - Model bf16: ~21.5GB
-  - Phase 1: Encoder frozen, head only (35.7M trainable). Batch=8 pairs.
-  - Phase 2: Unfreeze top 4 encoder layers (~890M). Batch=4, grad_accum=8.
-  - Gradient checkpointing enabled after unfreeze.
+Base model: Unbabel/wmt22-cometkiwi-da (CometKiwi-22, XLM-RoBERTa-Large, 580M)
+Loss: 0.3*MSE + 0.7*adaptive margin ranking loss
+Training: within-document (better, worse) pairs
 
 Run:
   poetry run python scripts/02_finetune_pairwise.py
-  poetry run python scripts/02_finetune_pairwise.py --epochs 5 --batch-size 4 --grad-accum 8
+  poetry run python scripts/02_finetune_pairwise.py --epochs 10 --batch-size 32
 """
 
 import os
@@ -20,7 +18,6 @@ import sys
 import time
 import json
 import argparse
-import gc
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ssl_fix
@@ -34,29 +31,25 @@ import torch.nn.functional as F
 from scipy import stats
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--epochs", type=int, default=5)
-parser.add_argument("--batch-size", type=int, default=8)
-parser.add_argument("--grad-accum", type=int, default=4)
-parser.add_argument("--lr", type=float, default=5e-6)
-parser.add_argument("--encoder-lr", type=float, default=1e-7)
+parser.add_argument("--epochs", type=int, default=10)
+parser.add_argument("--batch-size", type=int, default=32)
+parser.add_argument("--lr", type=float, default=1e-5)
+parser.add_argument("--encoder-lr", type=float, default=5e-7)
 parser.add_argument("--margin", type=float, default=0.01)
 parser.add_argument("--mse-weight", type=float, default=0.3)
-parser.add_argument("--frozen-epochs", type=float, default=1.0)
-parser.add_argument("--unfreeze-layers", type=int, default=4)
+parser.add_argument("--frozen-epochs", type=float, default=0.3)
 parser.add_argument("--max-pairs", type=int, default=50000)
-parser.add_argument("--eval-batch-size", type=int, default=32)
 parser.add_argument("--min-score-diff", type=float, default=1.0)
-parser.add_argument("--patience", type=int, default=2)
+parser.add_argument("--patience", type=int, default=3)
+parser.add_argument("--eval-batch-size", type=int, default=128)
 args = parser.parse_args()
 
-EFFECTIVE_BATCH = args.batch_size * args.grad_accum
-
 
 # ---------------------------------------------------------------------------
-# 1. Load data from JSONL
+# 1. Load data
 # ---------------------------------------------------------------------------
 print("=" * 80)
-print("PAIRWISE RANKING FINE-TUNING — CometKiwi-23-XXL (10.7B)")
+print("PAIRWISE RANKING FINE-TUNING — CometKiwi-22 (580M)")
 print("=" * 80)
 
 
@@ -68,17 +61,12 @@ def load_jsonl(path):
 train_data = load_jsonl("data/train.jsonl")
 dev_data = load_jsonl("data/dev.jsonl")
 
-# Filter to target LPs only (en-de, en-zh)
+# Filter to target LPs
 train_data = [r for r in train_data
               if r["src_lang"] == "en" and r["tgt_lang"] in ("de", "zh")]
-dev_data = [r for r in dev_data
-            if r["src_lang"] == "en" and r["tgt_lang"] in ("de", "zh")]
 
-print(f"Train: {len(train_data)} samples (en-de/zh only)")
+print(f"Train: {len(train_data)} samples (en-de/zh)")
 print(f"Dev: {len(dev_data)} samples")
-
-doc_ids = set(r["doc_id"] for r in train_data)
-print(f"Training docs: {len(doc_ids)}")
 
 
 # ---------------------------------------------------------------------------
@@ -126,63 +114,45 @@ if len(all_pairs) > args.max_pairs:
 # ---------------------------------------------------------------------------
 from comet import download_model, load_from_checkpoint
 
-print("\nLoading CometKiwi-23-XXL...")
-model_path = download_model("Unbabel/wmt23-cometkiwi-da-xxl")
+print("\nLoading CometKiwi-22...")
+model_path = download_model("Unbabel/wmt22-cometkiwi-da")
 model = load_from_checkpoint(model_path)
 
-if not torch.cuda.is_available():
-    print("ERROR: GPU required for CK-23-XXL fine-tuning.")
-    sys.exit(1)
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+else:
+    device = torch.device("cpu")
+    print("Using CPU (will be slow)")
 
-device = torch.device("cuda")
-print(f"GPU: {torch.cuda.get_device_name(0)}")
-vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-print(f"VRAM: {vram_gb:.1f} GB")
-
-model = model.to(dtype=torch.bfloat16, device=device)
-allocated_gb = torch.cuda.memory_allocated() / 1e9
-print(f"Model loaded in bf16: {allocated_gb:.1f} GB")
+model = model.to(device)
 
 
 # ---------------------------------------------------------------------------
 # 4. Parameter groups
 # ---------------------------------------------------------------------------
-encoder_layer_params = {}
-other_encoder_params = []
+encoder_params = []
 head_params = []
-
 for name, param in model.named_parameters():
-    if "encoder.model.encoder.layer." in name:
-        parts = name.split(".")
-        layer_idx = int(parts[parts.index("layer") + 1])
-        if layer_idx not in encoder_layer_params:
-            encoder_layer_params[layer_idx] = []
-        encoder_layer_params[layer_idx].append(param)
-    elif "encoder" in name:
-        other_encoder_params.append(param)
+    if "encoder" in name or "layernorm_embedding" in name or "embed_tokens" in name:
+        encoder_params.append(param)
     else:
         head_params.append(param)
 
-n_encoder_layers = max(encoder_layer_params.keys()) + 1
-total_head = sum(p.numel() for p in head_params)
-print(f"Encoder: {n_encoder_layers} layers")
-print(f"Head: {total_head/1e6:.1f}M params")
-print(f"Will unfreeze top {args.unfreeze_layers} layers after {args.frozen_epochs} epochs")
+print(f"Encoder params: {sum(p.numel() for p in encoder_params)/1e6:.1f}M")
+print(f"Head params: {sum(p.numel() for p in head_params)/1e6:.1f}M")
 
-for param in model.parameters():
+# Freeze encoder initially
+for param in encoder_params:
     param.requires_grad = False
-for param in head_params:
-    param.requires_grad = True
-
-trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Initially trainable: {trainable/1e6:.1f}M params (head only)")
 
 
 # ---------------------------------------------------------------------------
 # 5. Scoring and evaluation
 # ---------------------------------------------------------------------------
 def score_batch(model, src_texts, mt_texts):
-    """Get differentiable scores. Caller must wrap in autocast if desired."""
+    """Get differentiable scores from CometKiwi."""
     samples = [{"src": s, "mt": m} for s, m in zip(src_texts, mt_texts)]
     batch = model.prepare_sample(samples, stage="predict")
     input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -192,6 +162,7 @@ def score_batch(model, src_texts, mt_texts):
 
 
 def evaluate_on_dev(model, dev_rows):
+    """Evaluate per-source Kendall Tau on dev set."""
     model.eval()
     all_scores = []
 
@@ -200,13 +171,8 @@ def evaluate_on_dev(model, dev_rows):
             batch_rows = dev_rows[i:i + args.eval_batch_size]
             src_texts = [r["src_text"] for r in batch_rows]
             mt_texts = [r["tgt_text"] for r in batch_rows]
-            samples = [{"src": s, "mt": m} for s, m in zip(src_texts, mt_texts)]
-            batch = model.prepare_sample(samples, stage="predict")
-            input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                          for k, v in batch[0].items()}
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                prediction = model.forward(**input_dict)
-            all_scores.extend(prediction.score.float().cpu().tolist())
+            scores = score_batch(model, src_texts, mt_texts)
+            all_scores.extend(scores.cpu().tolist())
 
     from collections import defaultdict
     doc_scores = defaultdict(lambda: {"pred": [], "gold": []})
@@ -230,7 +196,8 @@ def evaluate_on_dev(model, dev_rows):
         lp_groups[f"{row['src_lang']}-{row['tgt_lang']}"].append((row, pred))
 
     for lp, items in sorted(lp_groups.items()):
-        lp_doc_scores = defaultdict(lambda: {"pred": [], "gold": []})
+        from collections import defaultdict as dd
+        lp_doc_scores = dd(lambda: {"pred": [], "gold": []})
         for row, pred in items:
             lp_doc_scores[row["doc_id"]]["pred"].append(pred)
             lp_doc_scores[row["doc_id"]]["gold"].append(row["score"])
@@ -257,6 +224,7 @@ optimizer = torch.optim.AdamW([
 steps_per_epoch = len(all_pairs) // args.batch_size
 total_steps = args.epochs * steps_per_epoch
 warmup_steps = int(0.1 * total_steps)
+unfreeze_step = int(args.frozen_epochs * steps_per_epoch)
 
 
 def lr_lambda(step):
@@ -266,12 +234,11 @@ def lr_lambda(step):
 
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-unfreeze_step = int(args.frozen_epochs * steps_per_epoch)
 
 print(f"\nTraining config:")
-print(f"  Epochs: {args.epochs}, Batch: {args.batch_size} (effective: {EFFECTIVE_BATCH})")
+print(f"  Epochs: {args.epochs}, Batch: {args.batch_size}")
 print(f"  Steps/epoch: {steps_per_epoch}, Total: {total_steps}")
-print(f"  Unfreeze at step: {unfreeze_step}")
+print(f"  Unfreeze encoder at step: {unfreeze_step}")
 print(f"  Head LR: {args.lr}, Encoder LR: {args.encoder_lr}")
 
 
@@ -291,9 +258,8 @@ model.train()
 _samples = [{"src": "test", "mt": "test"}] * 2
 _batch = model.prepare_sample(_samples, stage="predict")
 _input = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in _batch[0].items()}
-with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-    _pred = model.forward(**_input)
-    _pred.score.mean().backward()
+_pred = model.forward(**_input)
+_pred.score.mean().backward()
 _has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
                 for p in model.parameters() if p.requires_grad)
 print(f"  [Pre-flight] OK, gradients flowing: {_has_grad}")
@@ -323,31 +289,23 @@ for epoch in range(args.epochs):
     indices = np.random.permutation(len(all_pairs))
 
     for step_idx in range(0, len(indices), args.batch_size):
-        # Unfreeze top encoder layers
+        # Unfreeze encoder after warmup
         if not encoder_unfrozen and global_step >= unfreeze_step:
             encoder_unfrozen = True
-            layers_to_unfreeze = list(range(
-                n_encoder_layers - args.unfreeze_layers, n_encoder_layers
-            ))
-            for layer_idx in layers_to_unfreeze:
-                for param in encoder_layer_params[layer_idx]:
-                    param.requires_grad = True
-
-            unfrozen_encoder_params = []
-            for layer_idx in layers_to_unfreeze:
-                unfrozen_encoder_params.extend(encoder_layer_params[layer_idx])
+            for param in encoder_params:
+                param.requires_grad = True
 
             optimizer = torch.optim.AdamW([
-                {"params": head_params, "lr": args.lr * lr_lambda(global_step)},
-                {"params": unfrozen_encoder_params, "lr": args.encoder_lr},
+                {"params": encoder_params, "lr": args.encoder_lr},
+                {"params": head_params, "lr": args.lr},
             ], weight_decay=0.01)
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
             for _ in range(global_step):
                 scheduler.step()
 
-            unfrozen_count = sum(p.numel() for p in unfrozen_encoder_params)
-            print(f"  [Step {global_step}] Unfroze top {args.unfreeze_layers} layers "
-                  f"({unfrozen_count/1e6:.0f}M params).")
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"  [Step {global_step}] Encoder unfrozen. "
+                  f"Trainable: {trainable/1e6:.0f}M params.")
 
         batch_indices = indices[step_idx:step_idx + args.batch_size]
         if len(batch_indices) < 2:
@@ -362,55 +320,42 @@ for epoch in range(args.epochs):
         gold_margins = torch.tensor([b["margin"] for b in batch],
                                     dtype=torch.float32, device=device)
 
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            pred_better = score_batch(model,
-                                      [b["src"] for b in batch],
-                                      [b["mt_better"] for b in batch])
-            pred_worse = score_batch(model,
-                                     [b["src"] for b in batch],
-                                     [b["mt_worse"] for b in batch])
+        pred_better = score_batch(model,
+                                  [b["src"] for b in batch],
+                                  [b["mt_better"] for b in batch])
+        pred_worse = score_batch(model,
+                                 [b["src"] for b in batch],
+                                 [b["mt_worse"] for b in batch])
 
-            pred_better_f = pred_better.float()
-            pred_worse_f = pred_worse.float()
+        # Adaptive margin ranking loss
+        adaptive_margin = torch.clamp(gold_margins * 0.5, min=args.margin)
+        ranking_loss = torch.clamp(
+            adaptive_margin - (pred_better - pred_worse), min=0
+        ).mean()
 
-            adaptive_margin = torch.clamp(gold_margins * 0.5, min=args.margin)
-            ranking_loss = torch.clamp(
-                adaptive_margin - (pred_better_f - pred_worse_f), min=0
-            ).mean()
+        # MSE loss for calibration
+        mse_loss = (F.mse_loss(pred_better, gold_better)
+                    + F.mse_loss(pred_worse, gold_worse)) / 2.0
 
-            mse_loss = (F.mse_loss(pred_better_f, gold_better)
-                        + F.mse_loss(pred_worse_f, gold_worse)) / 2.0
+        loss = args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss
 
-            loss = (args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss)
-            loss = loss / args.grad_accum
-
+        optimizer.zero_grad()
         loss.backward()
-
-        if (global_step + 1) % args.grad_accum == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
-            scheduler.step()
-
-        global_step += 1
-        epoch_losses.append(loss.item() * args.grad_accum)
-
-        with torch.no_grad():
-            epoch_ranking_correct += (pred_better_f > pred_worse_f).sum().item()
-            epoch_ranking_total += n
-
-        if global_step % 200 == 0:
-            avg_loss = np.mean(epoch_losses[-200:])
-            rank_acc = epoch_ranking_correct / max(1, epoch_ranking_total)
-            mem_gb = torch.cuda.memory_allocated() / 1e9
-            print(f"  Step {global_step}: loss={avg_loss:.4f}, "
-                  f"rank_acc={rank_acc:.4f}, mem={mem_gb:.1f}GB")
-
-    # Flush remaining gradients
-    if global_step % args.grad_accum != 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        optimizer.zero_grad()
+        scheduler.step()
+
+        global_step += 1
+        epoch_losses.append(loss.item())
+
+        with torch.no_grad():
+            epoch_ranking_correct += (pred_better > pred_worse).sum().item()
+            epoch_ranking_total += n
+
+        if global_step % 100 == 0:
+            avg_loss = np.mean(epoch_losses[-100:])
+            rank_acc = epoch_ranking_correct / max(1, epoch_ranking_total)
+            print(f"  Step {global_step}: loss={avg_loss:.4f}, rank_acc={rank_acc:.4f}")
 
     elapsed = time.time() - epoch_start
     avg_loss = np.mean(epoch_losses) if epoch_losses else 0
