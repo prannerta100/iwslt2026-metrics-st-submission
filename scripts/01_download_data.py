@@ -48,6 +48,13 @@ def write_jsonl(dataset, path, include_score=True):
 print("Loading maikezu/iwslt2026-metrics-shared-train-dev...")
 ds = load_dataset("maikezu/iwslt2026-metrics-shared-train-dev")
 
+# Remove audio column to avoid slow decoding during iteration
+for split in ds:
+    if "audio" in ds[split].column_names:
+        ds[split] = ds[split].remove_columns(["audio"])
+
+print(f"  Columns: {ds['train'].column_names}")
+
 n_train = write_jsonl(ds["train"], "data/train.jsonl", include_score=True)
 print(f"  data/train.jsonl: {n_train} rows")
 
@@ -72,6 +79,12 @@ print("\nLoading maikezu/iwslt2026-metrics-shared-test...")
 ds_test = load_dataset("maikezu/iwslt2026-metrics-shared-test")
 test_split = ds_test["test"] if "test" in ds_test else ds_test[list(ds_test.keys())[0]]
 
+# Remove audio column
+if "audio" in test_split.column_names:
+    test_split = test_split.remove_columns(["audio"])
+
+print(f"  Test columns: {test_split.column_names}")
+
 n_test = write_jsonl(test_split, "data/test.jsonl", include_score=False)
 print(f"  data/test.jsonl: {n_test} rows")
 
@@ -88,10 +101,18 @@ for path in ["data/train.jsonl", "data/dev.jsonl", "data/test.jsonl"]:
         lines = f.readlines()
     first = json.loads(lines[0])
     print(f"  {path}: {len(lines)} rows, keys={list(first.keys())}")
-    assert "src_text" in first
-    assert "tgt_text" in first
-    assert "doc_id" in first
-    assert "src_lang" in first
-    assert "tgt_lang" in first
+    assert "src_text" in first, f"Missing src_text in {path}: {list(first.keys())}"
+    assert "tgt_text" in first, f"Missing tgt_text in {path}: {list(first.keys())}"
+    assert "doc_id" in first, f"Missing doc_id in {path}: {list(first.keys())}"
+    assert "src_lang" in first, f"Missing src_lang in {path}: {list(first.keys())}"
+    assert "tgt_lang" in first, f"Missing tgt_lang in {path}: {list(first.keys())}"
+    # Check non-empty text
+    assert len(first["src_text"]) > 0, f"Empty src_text in {path}"
+    assert len(first["tgt_text"]) > 0, f"Empty tgt_text in {path}"
+
+# Check train/dev have scores
+with open("data/train.jsonl") as f:
+    first_train = json.loads(f.readline())
+assert "score" in first_train, "Training data missing 'score' field"
 
 print("\nDone. All data files ready.")

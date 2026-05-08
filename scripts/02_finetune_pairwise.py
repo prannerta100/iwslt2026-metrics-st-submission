@@ -182,12 +182,12 @@ print(f"Initially trainable: {trainable/1e6:.1f}M params (head only)")
 # 5. Scoring and evaluation
 # ---------------------------------------------------------------------------
 def score_batch(model, src_texts, mt_texts):
+    """Get differentiable scores. Caller must wrap in autocast if desired."""
     samples = [{"src": s, "mt": m} for s, m in zip(src_texts, mt_texts)]
     batch = model.prepare_sample(samples, stage="predict")
     input_dict = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                   for k, v in batch[0].items()}
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        prediction = model.forward(**input_dict)
+    prediction = model.forward(**input_dict)
     return prediction.score
 
 
@@ -310,7 +310,6 @@ best_ckpt_path = None
 patience_counter = 0
 global_step = 0
 encoder_unfrozen = False
-scaler = torch.amp.GradScaler("cuda")
 
 os.makedirs("models", exist_ok=True)
 
@@ -387,13 +386,11 @@ for epoch in range(args.epochs):
             loss = (args.mse_weight * mse_loss + (1 - args.mse_weight) * ranking_loss)
             loss = loss / args.grad_accum
 
-        scaler.scale(loss).backward()
+        loss.backward()
 
         if (global_step + 1) % args.grad_accum == 0:
-            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
 
@@ -413,10 +410,8 @@ for epoch in range(args.epochs):
 
     # Flush remaining gradients
     if global_step % args.grad_accum != 0:
-        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
         optimizer.zero_grad()
 
     elapsed = time.time() - epoch_start
