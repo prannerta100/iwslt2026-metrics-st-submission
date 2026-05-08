@@ -309,30 +309,33 @@ if test_preds is None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Generate submission file (ONE file, all LPs, original row order)
+# 6. Generate submission files (ONE file PER LANGUAGE PAIR)
+# ---------------------------------------------------------------------------
+# Submission format (from iwslt.org/2026/metrics):
+#   "Submit one file per language pair with one score per line,
+#    in the same order as the entries in the Hugging Face dataset."
+# Email to: maike.zuefle@kit.edu AND vzouhar@ethz.ch
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 80)
-print("GENERATING SUBMISSION FILE")
+print("GENERATING SUBMISSION FILES (per language pair)")
 print("=" * 80)
 
 test["final_score"] = test_preds
 
-# PRIMARY SUBMISSION: one file with ALL scores in original dataset order.
-# The evaluation script reads this and splits by LP internally.
-submission_file = os.path.join(args.output_dir, "iwslt26test_lgbm_ensemble.jsonl")
-with open(submission_file, "w") as f:
-    for score in test["final_score"].values:
-        f.write(f"{score}\n")
-print(f"  {submission_file}: {len(test)} scores (ALL language pairs, original order)")
-print(f"    mean={test_preds.mean():.4f}, std={test_preds.std():.4f}, "
-      f"min={test_preds.min():.4f}, max={test_preds.max():.4f}")
-
-# Per-LP stats (informational only)
+submission_files = {}
 for lp_name, tgt_lang in [("ende", "de"), ("enzh", "zh")]:
     lp_mask = test["tgt_lang"] == tgt_lang
     lp_scores = test.loc[lp_mask, "final_score"].values
-    print(f"    {lp_name}: {len(lp_scores)} scores, "
-          f"mean={lp_scores.mean():.4f}, std={lp_scores.std():.4f}")
+
+    fname = f"primary_{lp_name}.txt"
+    fpath = os.path.join(args.output_dir, fname)
+    with open(fpath, "w") as f:
+        for score in lp_scores:
+            f.write(f"{score}\n")
+    submission_files[lp_name] = fpath
+    print(f"  {fpath}: {len(lp_scores)} scores")
+    print(f"    mean={lp_scores.mean():.4f}, std={lp_scores.std():.4f}, "
+          f"[{lp_scores.min():.4f}, {lp_scores.max():.4f}]")
 
 # Save full test predictions for debugging
 test.to_parquet(os.path.join(args.output_dir, "test_final_predictions.parquet"), index=False)
@@ -441,20 +444,22 @@ else:
     print("  WARNING: No dev data with gold scores — cannot evaluate methods")
 
 # ---------------------------------------------------------------------------
-# 8. Select best and second-best based on dev evaluation
+# 8. Select best and second-best, write per-LP submission files
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 80)
-print("GENERATING SUBMISSION FILES (best + second-best)")
+print("WRITING SUBMISSION FILES (per language pair)")
 print("=" * 80)
 
-# Best is always the LightGBM ensemble (already written above as submission_file)
-print(f"\n  1st SUBMISSION: {submission_file}")
+# 1st submission = LightGBM ensemble (already written above as primary_ende.txt / primary_enzh.txt)
+print(f"\n  PRIMARY SUBMISSION (1st):")
 print(f"       Method: lgbm_ensemble")
+for lp, fpath in submission_files.items():
+    print(f"       {fpath}")
 if method_results:
     best = method_results[0]
     print(f"       Dev Tau: {best['dev_tau']:.4f} (en-de: {best['dev_ende']:.4f}, en-zh: {best['dev_enzh']:.4f})")
 
-# Second-best: pick the best method from dev that is submittable (in test) and not lgbm
+# 2nd submission: pick best method from dev that is submittable (in test) and not lgbm
 second_best_col = None
 second_result = None
 if method_results and len(method_results) >= 2:
@@ -467,18 +472,9 @@ if method_results and len(method_results) >= 2:
         second_result = r
         break
 
-if second_best_col and second_best_col in test.columns:
-    second_file = os.path.join(args.output_dir, f"iwslt26test_{second_best_col.replace('_score', '')}_2nd.jsonl")
-    with open(second_file, "w") as f:
-        for score in test[second_best_col].values:
-            f.write(f"{score}\n")
-    print(f"\n  2nd SUBMISSION: {second_file}")
-    print(f"       Method: {second_best_col}")
-    print(f"       Dev Tau: {second_result['dev_tau']:.4f} (en-de: {second_result['dev_ende']:.4f}, en-zh: {second_result['dev_enzh']:.4f})")
-elif not method_results:
-    # No dev eval available — fall back to priority list
+if not second_best_col:
     FALLBACK_PRIORITY = [
-        "llm_debate_score", "pairwise_score", "finetuned_score",
+        "pairwise_score", "finetuned_score", "llm_debate_score",
         "cometkiwi23xxl_finetuned_score", "cometkiwi23xxl_score",
         "cometkiwi22_score",
     ]
@@ -486,39 +482,40 @@ elif not method_results:
         if col in test.columns:
             second_best_col = col
             break
-    if second_best_col:
-        second_file = os.path.join(args.output_dir, f"iwslt26test_{second_best_col.replace('_score', '')}_2nd.jsonl")
-        with open(second_file, "w") as f:
-            for score in test[second_best_col].values:
+
+second_files = {}
+if second_best_col and second_best_col in test.columns:
+    method_short = second_best_col.replace("_score", "")
+    print(f"\n  CONTRASTIVE SUBMISSION (2nd):")
+    print(f"       Method: {second_best_col}")
+    for lp_name, tgt_lang in [("ende", "de"), ("enzh", "zh")]:
+        lp_mask = test["tgt_lang"] == tgt_lang
+        lp_scores = test.loc[lp_mask, second_best_col].values
+
+        fname = f"contrastive_{method_short}_{lp_name}.txt"
+        fpath = os.path.join(args.output_dir, fname)
+        with open(fpath, "w") as f:
+            for score in lp_scores:
                 f.write(f"{score}\n")
-        print(f"\n  2nd SUBMISSION: {second_file}")
-        print(f"       Method: {second_best_col} (fallback — no dev eval available)")
+        second_files[lp_name] = fpath
+        print(f"       {fpath}: {len(lp_scores)} scores")
+    if second_result:
+        print(f"       Dev Tau: {second_result['dev_tau']:.4f} (en-de: {second_result['dev_ende']:.4f}, en-zh: {second_result['dev_enzh']:.4f})")
 
 # ---------------------------------------------------------------------------
-# 9. Also produce per-signal backup submissions (single file, all LPs)
-# ---------------------------------------------------------------------------
-print("\n--- All per-signal backup submissions ---")
-for col in test_signals:
-    backup_file = os.path.join(args.output_dir, f"iwslt26test_{col.replace('_score', '')}.jsonl")
-    with open(backup_file, "w") as f:
-        for score in test[col].values:
-            f.write(f"{score}\n")
-    print(f"  {backup_file}: {len(test)} scores")
-
-# ---------------------------------------------------------------------------
-# 10. Save results table as JSON
+# 9. Save results table as JSON
 # ---------------------------------------------------------------------------
 results_json = {
     "dev_evaluation": method_results,
     "1st_submission": {
-        "file": submission_file,
+        "files": submission_files,
         "method": "lgbm_ensemble",
         "dev_tau": method_results[0]["dev_tau"] if method_results else None,
         "dev_ende": method_results[0]["dev_ende"] if method_results else None,
         "dev_enzh": method_results[0]["dev_enzh"] if method_results else None,
     },
     "2nd_submission": {
-        "file": second_file if second_best_col else None,
+        "files": second_files,
         "method": second_best_col,
         "dev_tau": second_result["dev_tau"] if second_result else None,
         "dev_ende": second_result["dev_ende"] if second_result else None,
@@ -529,5 +526,13 @@ with open(os.path.join(args.output_dir, "submission_results.json"), "w") as f:
     json.dump(results_json, f, indent=2)
 
 print("\n" + "=" * 80)
-print("DONE — submission_results.json saved with full evaluation table")
+print("DONE")
 print("=" * 80)
+print("\nEMAIL TO: maike.zuefle@kit.edu AND vzouhar@ethz.ch")
+print("\n  Primary submission files:")
+for lp, fpath in submission_files.items():
+    print(f"    {fpath}")
+if second_files:
+    print(f"\n  Contrastive submission files:")
+    for lp, fpath in second_files.items():
+        print(f"    {fpath}")

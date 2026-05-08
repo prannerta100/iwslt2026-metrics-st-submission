@@ -303,9 +303,10 @@ if args.phase <= 7:
         critical=True,
     )
 
-    # Verify submission file exists
-    require_file("submission/iwslt26test_lgbm_ensemble.jsonl",
-                 "15_final_submission.py should have created this")
+    # Verify submission files exist (one per LP)
+    for lp in ["ende", "enzh"]:
+        require_file(f"submission/primary_{lp}.txt",
+                     f"15_final_submission.py should have created submission/primary_{lp}.txt")
 
 
 # =========================================================================
@@ -334,12 +335,12 @@ if os.path.isdir("outputs"):
             print(f"  outputs/{f:40s} {size/1024:>8.1f} KB")
 
 if os.path.isdir("submission"):
-    print("\nSUBMISSION FILES (send these to organizers):")
+    print("\nSUBMISSION FILES (email to organizers):")
     for f in sorted(os.listdir("submission")):
-        if f.endswith(".jsonl"):
+        if f.endswith(".txt") and (f.startswith("primary_") or f.startswith("contrastive_")):
             size = os.path.getsize(os.path.join("submission", f))
             n_lines = sum(1 for _ in open(os.path.join("submission", f)))
-            print(f"  submission/{f:35s} {n_lines:>6} scores, {size/1024:>6.1f} KB")
+            print(f"  submission/{f:40s} {n_lines:>6} scores, {size/1024:>6.1f} KB")
 
 # Print report summary
 report_file = "outputs/results_report.json"
@@ -351,7 +352,7 @@ if os.path.exists(report_file):
     for m in report["methods"][:5]:
         print(f"  {m['name']:<35} tau={m['tau_per_source']:.4f}")
 
-print("\nTo submit:")
-print("  submission/iwslt26test_lgbm_ensemble.jsonl")
-print("  (ONE file, all LPs in original dataset row order)")
-print("  Format: one bare number per line, json.loads() parseable")
+print("\nTo submit (email to maike.zuefle@kit.edu AND vzouhar@ethz.ch):")
+print("  PRIMARY:     submission/primary_ende.txt + submission/primary_enzh.txt")
+print("  CONTRASTIVE: submission/contrastive_*_ende.txt + submission/contrastive_*_enzh.txt")
+print("  Format: one score per line per LP, same order as HF test dataset")
