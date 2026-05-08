@@ -333,8 +333,6 @@ for epoch in range(args.epochs):
                 for param in encoder_layer_params[layer_idx]:
                     param.requires_grad = True
 
-            model.encoder.model.gradient_checkpointing_enable()
-
             unfrozen_encoder_params = []
             for layer_idx in layers_to_unfreeze:
                 unfrozen_encoder_params.extend(encoder_layer_params[layer_idx])
@@ -349,7 +347,7 @@ for epoch in range(args.epochs):
 
             unfrozen_count = sum(p.numel() for p in unfrozen_encoder_params)
             print(f"  [Step {global_step}] Unfroze top {args.unfreeze_layers} layers "
-                  f"({unfrozen_count/1e6:.0f}M params). Grad checkpointing ON.")
+                  f"({unfrozen_count/1e6:.0f}M params).")
 
         batch_indices = indices[step_idx:step_idx + args.batch_size]
         if len(batch_indices) < 2:

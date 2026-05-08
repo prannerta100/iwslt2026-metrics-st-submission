@@ -138,8 +138,6 @@ if ckpt_files:
     model.eval()
     print(f"  Loaded checkpoint: {ckpt_path}")
 
-    if hasattr(model.encoder.model, "gradient_checkpointing_disable"):
-        model.encoder.model.gradient_checkpointing_disable()
 
     comet_samples = [{"src": r["src_text"], "mt": r["tgt_text"]} for r in test_data]
     finetuned_scores = []
